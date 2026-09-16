@@ -1,11 +1,20 @@
 import 'package:flutter/material.dart';
 
 import '../../models/scan_data.dart';
+import '../../models/detection_record.dart';
+import '../../services/database_helper.dart';
 import '../../services/thermal_simulator.dart';
 import 'sop_dialog.dart';
 
 class ThermalScanView extends StatefulWidget {
-  const ThermalScanView({super.key});
+  const ThermalScanView({
+    super.key,
+    this.latitude,
+    this.longitude,
+  });
+
+  final double? latitude;
+  final double? longitude;
 
   @override
   State<ThermalScanView> createState() => _ThermalScanViewState();
@@ -31,12 +40,42 @@ class _ThermalScanViewState extends State<ThermalScanView> {
 
     final scan = _scan!;
     setState(() => _isScanning = false);
-    if (scan.analyze().isHighRisk && _alertScanId != scan.id) {
+    if (scan.analyze().level != DetectionLevel.safe && _alertScanId != scan.id) {
       _alertScanId = scan.id;
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) SopDialog.show(context);
+        if (mounted) _showSop(scan);
       });
     }
+  }
+
+  Future<void> _showSop(ScanData scan) async {
+    final result = scan.analyze();
+    final decision = await SopDialog.show(
+      context,
+      deltaT: result.deltaT,
+      rssi: result.rssi,
+    );
+    if (!mounted || decision == null || decision == SopDecision.normal) return;
+
+    if (decision == SopDecision.uncertainWarning) {
+      await SopDialog.showObstructionAdvice(context);
+    }
+
+    final isDanger = decision == SopDecision.confirmedDanger;
+    await DatabaseHelper.instance.insertRecord(
+      DetectionRecord(
+        timestamp: DateTime.now(),
+        maxDeltaT: result.deltaT,
+        maxRSSI: result.rssi,
+        latitude: widget.latitude,
+        longitude: widget.longitude,
+        statusColor: isDanger ? 'RED' : 'YELLOW',
+        userDecision: isDanger ? 'CONFIRMED_DANGER' : 'UNCERTAIN_WARNING',
+        adviceText: isDanger
+            ? '確認異常：請立即停止使用並以膠帶遮蔽可疑位置，必要時拔除電源。'
+            : '待驗證：建議貼膠帶遮蔽可疑位置或拔除電源後重新掃描。',
+      ),
+    );
   }
 
   @override

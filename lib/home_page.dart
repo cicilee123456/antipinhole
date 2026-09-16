@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'views/history/history_view.dart';
+import 'views/map/safety_map_screen.dart';
 import 'views/settings/settings_view.dart';
 import 'views/thermal/thermal_scan_view.dart';
 
@@ -14,10 +15,11 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   int _selectedIndex = 0;
 
-  static const _pageTitles = ['總覽 Dashboard', '熱成像掃描', '歷史紀錄', '系統設定'];
+  static const _pageTitles = ['總覽 Dashboard', '熱成像掃描', '安全地圖', '歷史紀錄', '系統設定'];
   static const _pages = <Widget>[
     _DashboardView(),
     ThermalScanView(),
+    SafetyMapScreen(),
     HistoryView(),
     SettingsView(),
   ];
@@ -35,6 +37,7 @@ class _HomePageState extends State<HomePage> {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard), label: '總覽'),
           NavigationDestination(icon: Icon(Icons.thermostat_outlined), selectedIcon: Icon(Icons.thermostat), label: '熱成像'),
+          NavigationDestination(icon: Icon(Icons.map_outlined), selectedIcon: Icon(Icons.map), label: '地圖'),
           NavigationDestination(icon: Icon(Icons.history), label: '歷史'),
           NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: '設定'),
         ],
