@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+// 歷史模組目前為 POC 佔位頁，後續可接入本地資料庫或 API。
 class HistoryView extends StatelessWidget {
   const HistoryView({super.key});
 

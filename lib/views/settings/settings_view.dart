@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+// 設定模組預留硬體連線與警示策略的操作入口。
 class SettingsView extends StatelessWidget {
   const SettingsView({super.key});
 

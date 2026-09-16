@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+// 高風險時的人工排查流程，與熱成像頁面保持獨立以便日後擴充。
 class SopDialog extends StatelessWidget {
   const SopDialog({super.key});
 

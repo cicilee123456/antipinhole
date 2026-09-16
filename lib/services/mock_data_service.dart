@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 
 import '../models/scan_data.dart';
 
+// 載入固定 JSON 情境，提供安全、警示與高風險測試資料。
 class MockDataService {
   const MockDataService();
 

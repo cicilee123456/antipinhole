@@ -4,6 +4,7 @@ import 'views/history/history_view.dart';
 import 'views/settings/settings_view.dart';
 import 'views/thermal/thermal_scan_view.dart';
 
+// 外殼頁面負責全域導覽，不直接處理各子模組的業務邏輯。
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -14,6 +15,7 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   int _selectedIndex = 0;
 
+  // IndexedStack 保留各頁面的狀態，例如切換分頁後不會重置掃描畫面。
   static const _pageTitles = ['總覽 Dashboard', '熱成像掃描', '歷史紀錄', '系統設定'];
   static const _pages = <Widget>[
     _DashboardView(),
@@ -24,6 +26,7 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
+    // Dashboard 只呈現功能入口；實際功能由各 views 子模組負責。
     return Scaffold(
       appBar: AppBar(title: Text(_pageTitles[_selectedIndex])),
       body: IndexedStack(index: _selectedIndex, children: _pages),

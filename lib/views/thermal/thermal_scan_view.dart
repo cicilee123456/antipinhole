@@ -4,6 +4,7 @@ import '../../models/scan_data.dart';
 import '../../services/thermal_simulator.dart';
 import 'sop_dialog.dart';
 
+// 熱成像子模組：負責產生掃描、顯示熱圖與呈現風險結果。
 class ThermalScanView extends StatefulWidget {
   const ThermalScanView({super.key});
 
@@ -24,6 +25,7 @@ class _ThermalScanViewState extends State<ThermalScanView> {
   }
 
   void _runScan() {
+    // 模擬器同步產生一筆新資料；真實硬體接入時可替換此服務實作。
     setState(() {
       _isScanning = true;
       _scan = _simulator.scan();
@@ -31,6 +33,7 @@ class _ThermalScanViewState extends State<ThermalScanView> {
 
     final scan = _scan!;
     setState(() => _isScanning = false);
+    // 每筆掃描只提示一次，避免畫面重建時重複彈窗。
     if (scan.analyze().isHighRisk && _alertScanId != scan.id) {
       _alertScanId = scan.id;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -184,6 +187,7 @@ class _ThermalGrid extends StatelessWidget {
   }
 
   static Color _colorFor(double temperature) {
+    // 使用固定絕對溫度範圍，避免低溫資料因相對正規化而誤呈紅色。
     final value = temperature
         .clamp(minimumTemperature, maximumTemperature)
         .toDouble();
