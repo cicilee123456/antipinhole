@@ -11,16 +11,16 @@ enum DetectionLevel {
   final String label;
 }
 
-class DetectionScenario {
-  const DetectionScenario({
+class ScanData {
+  const ScanData({
     required this.id,
     required this.deviceName,
     required this.rssi,
     required this.thermalGrid,
     this.capturedAt,
-  });
+  }) : assert(thermalGrid.length == 64, 'thermalGrid 必須包含 64 筆資料');
 
-  factory DetectionScenario.fromJson(Map<String, dynamic> json) {
+  factory ScanData.fromJson(Map<String, dynamic> json) {
     final rawGrid = json['thermal_grid'];
     if (rawGrid is! List || rawGrid.length != 64) {
       throw const FormatException('thermal_grid 必須是長度 64 的陣列');
@@ -36,7 +36,7 @@ class DetectionScenario {
       throw const FormatException('rssi 必須是數值');
     }
 
-    return DetectionScenario(
+    return ScanData(
       id: json['id']?.toString() ?? 'unknown',
       deviceName: json['device_name']?.toString() ?? '未命名裝置',
       rssi: rssi.toDouble(),
@@ -51,11 +51,11 @@ class DetectionScenario {
   final List<double> thermalGrid;
   final String? capturedAt;
 
-  DetectionResult analyze() => DetectionAnalyzer.evaluate(this);
+  ScanResult analyze() => DetectionAnalyzer.evaluate(this);
 }
 
-class DetectionResult {
-  const DetectionResult({
+class ScanResult {
+  const ScanResult({
     required this.level,
     required this.deltaT,
     required this.minimumTemperature,
@@ -77,34 +77,32 @@ class DetectionResult {
 class DetectionAnalyzer {
   const DetectionAnalyzer._();
 
-  static DetectionResult evaluate(DetectionScenario scenario) {
-    final minimumTemperature = scenario.thermalGrid.reduce(math.min);
-    final maximumTemperature = scenario.thermalGrid.reduce(math.max);
+  static ScanResult evaluate(ScanData scan) {
+    final minimumTemperature = scan.thermalGrid.reduce(math.min);
+    final maximumTemperature = scan.thermalGrid.reduce(math.max);
     final deltaT = maximumTemperature - minimumTemperature;
 
-    final hasHighThermalDelta = deltaT >= 6.0;
-    final hasStrongSignal = scenario.rssi >= -50.0;
-    final hasWarningThermalDelta = deltaT >= 4.0;
-    final hasWarningSignal = scenario.rssi >= -65.0;
+    final highThermalDelta = deltaT >= 6.0;
+    final strongSignal = scan.rssi >= -50.0;
+    final warningThermalDelta = deltaT >= 4.0;
+    final warningSignal = scan.rssi >= -65.0;
 
-    final level = hasHighThermalDelta && hasStrongSignal
+    final level = highThermalDelta && strongSignal
         ? DetectionLevel.highRisk
-        : (hasWarningThermalDelta || hasWarningSignal
-              ? DetectionLevel.warning
-              : DetectionLevel.safe);
+        : warningThermalDelta || warningSignal
+            ? DetectionLevel.warning
+            : DetectionLevel.safe;
 
-    // The score keeps both signals visible to consumers while the level above
-    // remains governed by the explicit product thresholds.
     final thermalScore = ((deltaT / 6.0) * 0.6).clamp(0.0, 0.6);
-    final signalScore = (((scenario.rssi + 100.0) / 50.0) * 0.4)
+    final signalScore = (((scan.rssi + 100.0) / 50.0) * 0.4)
         .clamp(0.0, 0.4);
 
-    return DetectionResult(
+    return ScanResult(
       level: level,
       deltaT: deltaT,
       minimumTemperature: minimumTemperature,
       maximumTemperature: maximumTemperature,
-      rssi: scenario.rssi,
+      rssi: scan.rssi,
       weightedScore: thermalScore + signalScore,
     );
   }

@@ -1,13 +1,13 @@
 import 'package:flutter/material.dart';
 
-class SOPGuideDialog extends StatelessWidget {
-  const SOPGuideDialog({super.key});
+class SopDialog extends StatelessWidget {
+  const SopDialog({super.key});
 
   static Future<void> show(BuildContext context) {
     return showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (_) => const SOPGuideDialog(),
+      builder: (_) => const SopDialog(),
     );
   }
 

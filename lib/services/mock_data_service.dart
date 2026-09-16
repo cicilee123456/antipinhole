@@ -2,7 +2,7 @@ import 'dart:convert';
 
 import 'package:flutter/services.dart';
 
-import '../models/detection_model.dart';
+import '../models/scan_data.dart';
 
 class MockDataService {
   const MockDataService();
@@ -13,7 +13,7 @@ class MockDataService {
     'warning': 'assets/scenario_warning.json',
   };
 
-  Future<DetectionScenario> loadScenario(String scenarioKey) async {
+  Future<ScanData> loadScenario(String scenarioKey) async {
     final assetPath = scenarioAssets[scenarioKey];
     if (assetPath == null) {
       throw ArgumentError.value(scenarioKey, 'scenarioKey', '未知情境');
@@ -25,6 +25,6 @@ class MockDataService {
       throw const FormatException('情境 JSON 根節點必須是物件');
     }
 
-    return DetectionScenario.fromJson(decoded);
+    return ScanData.fromJson(decoded);
   }
 }
