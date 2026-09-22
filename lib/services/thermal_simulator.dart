@@ -8,10 +8,22 @@ class ThermalSimulator {
 
   ScanData scan() {
     final random = Random();
+    // 依機率模擬三種狀態，避免每筆資料都因熱點過強而直接變成高風險。
+    final scenarioRoll = random.nextDouble();
+    final hotspotStrength = scenarioRoll < 0.75
+      ? 0.5 + random.nextDouble() * 1.5
+      : scenarioRoll < 0.98
+        ? 3.0 + random.nextDouble() * 1.5
+        : 6.5 + random.nextDouble() * 2.0;
+    final rssi = scenarioRoll < 0.75
+      ? -90.0 + random.nextDouble() * 20.0
+      : scenarioRoll < 0.98
+        ? -75.0 + random.nextDouble() * 17.0
+        : -49.0 + random.nextDouble() * 7.0;
+
     // 每次掃描重新決定熱點位置與強度，讓熱圖可重現不同風險情境。
     final hotspotX = random.nextInt(8);
     final hotspotY = random.nextInt(8);
-    final hotspotStrength = 6.0 + random.nextDouble() * 4.0;
     final thermalGrid = List<double>.generate(64, (index) {
       final x = index % 8;
       final y = index ~/ 8;
@@ -25,7 +37,7 @@ class ThermalSimulator {
     return ScanData(
       id: 'random-${DateTime.now().microsecondsSinceEpoch}',
       deviceName: 'Random Thermal Sensor',
-      rssi: -78.0 + random.nextDouble() * 36.0,
+      rssi: rssi,
       thermalGrid: thermalGrid,
       capturedAt: DateTime.now().toIso8601String(),
     );
