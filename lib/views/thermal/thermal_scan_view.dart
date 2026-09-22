@@ -1,7 +1,11 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
 import '../../models/scan_data.dart';
 import '../../services/thermal_simulator.dart';
+import '../../utils/thermal_interpolator.dart';
+import 'dynamic_thermal_painter.dart';
 import 'sop_dialog.dart';
 
 // 熱成像子模組：負責產生掃描、顯示熱圖與呈現風險結果。
@@ -15,26 +19,54 @@ class ThermalScanView extends StatefulWidget {
 class _ThermalScanViewState extends State<ThermalScanView> {
   static const _simulator = ThermalSimulator();
   ScanData? _scan;
+  List<double>? _interpolatedGrid;
   bool _isScanning = true;
+  Timer? _streamTimer;
   String? _alertScanId;
 
   @override
   void initState() {
     super.initState();
+    _startStream();
     _runScan();
   }
 
   void _runScan() {
     // 模擬器同步產生一筆新資料；真實硬體接入時可替換此服務實作。
+    _updateScan(_simulator.scan());
+  }
+
+  void _startStream() {
+    if (_streamTimer != null) return;
+
+    setState(() => _isScanning = true);
+    _streamTimer = Timer.periodic(
+      const Duration(milliseconds: 300),
+      (_) => _updateScan(_simulator.scan()),
+    );
+  }
+
+  void _pauseStream() {
+    _streamTimer?.cancel();
+    _streamTimer = null;
+    if (mounted) setState(() => _isScanning = false);
+  }
+
+  void _updateScan(ScanData scan) {
+    final interpolatedGrid = ThermalInterpolator.interpolate8x8(
+      scan.thermalGrid,
+      targetSize: 64,
+    );
+
+    if (!mounted) return;
     setState(() {
-      _isScanning = true;
-      _scan = _simulator.scan();
+      _scan = scan;
+      _interpolatedGrid = interpolatedGrid;
     });
 
-    final scan = _scan!;
-    setState(() => _isScanning = false);
     // 每筆掃描只提示一次，避免畫面重建時重複彈窗。
     if (scan.analyze().isHighRisk && _alertScanId != scan.id) {
+      _pauseStream();
       _alertScanId = scan.id;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) SopDialog.show(context);
@@ -43,9 +75,17 @@ class _ThermalScanViewState extends State<ThermalScanView> {
   }
 
   @override
+  void dispose() {
+    _streamTimer?.cancel();
+    _streamTimer = null;
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final scan = _scan;
-    if (_isScanning || scan == null) {
+    final interpolatedGrid = _interpolatedGrid;
+    if (scan == null || interpolatedGrid == null) {
       return const Center(child: CircularProgressIndicator());
     }
 
@@ -75,7 +115,17 @@ class _ThermalScanViewState extends State<ThermalScanView> {
                   Card(
                     child: Padding(
                       padding: const EdgeInsets.all(20),
-                      child: _ThermalGrid(thermalGrid: scan.thermalGrid),
+                      child: AspectRatio(
+                        aspectRatio: 1,
+                        child: CustomPaint(
+                          painter: DynamicThermalPainter(
+                            grid64x64: interpolatedGrid,
+                            minTemp: result.minimumTemperature,
+                            maxTemp: result.maximumTemperature,
+                          ),
+                          child: const SizedBox.expand(),
+                        ),
+                      ),
                     ),
                   ),
                   const SizedBox(height: 16),
@@ -101,9 +151,11 @@ class _ThermalScanViewState extends State<ThermalScanView> {
                   ),
                   const SizedBox(height: 16),
                   FilledButton.icon(
-                    onPressed: _runScan,
+                    onPressed: _isScanning ? _pauseStream : _startStream,
                     icon: const Icon(Icons.refresh),
-                    label: const Text('重新掃描隨機熱點'),
+                    label: Text(
+                      _isScanning ? '暫停即時掃描' : '開始即時掃描',
+                    ),
                   ),
                 ],
               ),
@@ -148,56 +200,6 @@ class _StatusCard extends StatelessWidget {
         ),
       ),
     );
-  }
-}
-
-class _ThermalGrid extends StatelessWidget {
-  const _ThermalGrid({required this.thermalGrid});
-
-  static const minimumTemperature = 20.0;
-  static const maximumTemperature = 35.0;
-  final List<double> thermalGrid;
-
-  @override
-  Widget build(BuildContext context) {
-    return AspectRatio(
-      aspectRatio: 1,
-      child: GridView.builder(
-        physics: const NeverScrollableScrollPhysics(),
-        itemCount: 64,
-        gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-          crossAxisCount: 8,
-          crossAxisSpacing: 2,
-          mainAxisSpacing: 2,
-        ),
-        itemBuilder: (context, index) {
-          final temperature = thermalGrid[index];
-          return Semantics(
-            label: '第 ${index + 1} 格，${temperature.toStringAsFixed(1)} 度',
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: _colorFor(temperature),
-                borderRadius: BorderRadius.circular(3),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-
-  static Color _colorFor(double temperature) {
-    // 使用固定絕對溫度範圍，避免低溫資料因相對正規化而誤呈紅色。
-    final value = temperature
-        .clamp(minimumTemperature, maximumTemperature)
-        .toDouble();
-    if (value <= 26) {
-      return Color.lerp(Colors.blueGrey.shade800, Colors.lightBlue, (value - 20) / 6)!;
-    }
-    if (value <= 28.5) {
-      return Color.lerp(Colors.lightBlue, Colors.orange, (value - 26) / 2.5)!;
-    }
-    return Color.lerp(Colors.orange, Colors.red, (value - 28.5) / 6.5)!;
   }
 }
 
