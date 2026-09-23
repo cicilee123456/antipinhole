@@ -1,8 +1,12 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 
+import '../../models/detection_record.dart';
 import '../../models/scan_data.dart';
+import '../../services/database_helper.dart';
+import '../../services/thermocam_ble_service.dart';
 import '../../services/thermal_simulator.dart';
 import '../../utils/thermal_interpolator.dart';
 import 'dynamic_thermal_painter.dart';
@@ -13,30 +17,66 @@ class ThermalScanView extends StatefulWidget {
   const ThermalScanView({super.key});
 
   @override
-  State<ThermalScanView> createState() => _ThermalScanViewState();
+  State<ThermalScanView> createState() => ThermalScanViewState();
 }
 
-class _ThermalScanViewState extends State<ThermalScanView> {
+class ThermalScanViewState extends State<ThermalScanView> {
   static const _simulator = ThermalSimulator();
+  final _bleService = ThermoCamBleService();
   ScanData? _scan;
   List<double>? _interpolatedGrid;
   bool _isScanning = true;
   Timer? _streamTimer;
+  StreamSubscription<ScanData>? _bleSubscription;
   String? _alertScanId;
+  String _connectionStatus = '尚未連接硬體，現在顯示模擬資料';
+  bool _usingHardware = false;
+  bool _isConnecting = false;
+  final Set<String> _persistedRiskScanIds = {};
 
   @override
   void initState() {
     super.initState();
-    _startStream();
-    _runScan();
+    _startSimulatorStream();
   }
 
-  void _runScan() {
-    // 模擬器同步產生一筆新資料；真實硬體接入時可替換此服務實作。
-    _updateScan(_simulator.scan());
+  Future<void> connectHardware() async {
+    if (_isConnecting || _usingHardware) return;
+
+    _streamTimer?.cancel();
+    _streamTimer = null;
+    setState(() {
+      _isConnecting = true;
+      _connectionStatus = '請在瀏覽器視窗中選擇 ThermoCam_BLE...';
+    });
+
+    try {
+      await _bleService.connect();
+      _bleSubscription = _bleService.scans.listen(_updateScan);
+      if (mounted) {
+        setState(() {
+          _usingHardware = true;
+          _isScanning = true;
+          _isConnecting = false;
+          _connectionStatus = '已連線 ThermoCam_BLE';
+        });
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isConnecting = false;
+        _connectionStatus = '硬體未連線，使用模擬資料';
+      });
+      _startSimulatorStream();
+    }
   }
 
   void _startStream() {
+    if (_usingHardware) return;
+    _startSimulatorStream();
+  }
+
+  void _startSimulatorStream() {
     if (_streamTimer != null) return;
 
     setState(() => _isScanning = true);
@@ -47,6 +87,10 @@ class _ThermalScanViewState extends State<ThermalScanView> {
   }
 
   void _pauseStream() {
+    if (_usingHardware) {
+      setState(() => _isScanning = false);
+      return;
+    }
     _streamTimer?.cancel();
     _streamTimer = null;
     if (mounted) setState(() => _isScanning = false);
@@ -66,6 +110,7 @@ class _ThermalScanViewState extends State<ThermalScanView> {
 
     // 每筆掃描只提示一次，避免畫面重建時重複彈窗。
     if (scan.analyze().isHighRisk && _alertScanId != scan.id) {
+      unawaited(_persistHighRiskScan(scan));
       _pauseStream();
       _alertScanId = scan.id;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -74,10 +119,47 @@ class _ThermalScanViewState extends State<ThermalScanView> {
     }
   }
 
+  Future<void> _persistHighRiskScan(ScanData scan) async {
+    if (_persistedRiskScanIds.contains(scan.id)) return;
+
+    final position = await _getCurrentPosition();
+    if (position == null) return;
+
+    final result = scan.analyze();
+    await DatabaseHelper.instance.insertRecord(
+      DetectionRecord(
+        timestamp: DateTime.now().toUtc(),
+        maxDeltaT: result.deltaT,
+        maxRSSI: result.rssi,
+        latitude: position.latitude,
+        longitude: position.longitude,
+        statusColor: 'RED',
+        userDecision: 'CONFIRMED_DANGER',
+        adviceText: '請立即檢查該位置並依現場安全程序處置。',
+      ),
+    );
+    _persistedRiskScanIds.add(scan.id);
+  }
+
+  Future<Position?> _getCurrentPosition() async {
+    if (!await Geolocator.isLocationServiceEnabled()) return null;
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      return null;
+    }
+    return Geolocator.getCurrentPosition();
+  }
+
   @override
   void dispose() {
     _streamTimer?.cancel();
     _streamTimer = null;
+    _bleSubscription?.cancel();
+    _bleService.dispose();
     super.dispose();
   }
 
@@ -110,6 +192,28 @@ class _ThermalScanViewState extends State<ThermalScanView> {
                     level: result.level.label,
                     color: levelColor,
                     deviceName: scan.deviceName,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(_connectionStatus),
+                  const SizedBox(height: 16),
+                  OutlinedButton.icon(
+                    onPressed: _isConnecting || _usingHardware
+                        ? null
+                        : connectHardware,
+                    icon: _isConnecting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.bluetooth),
+                    label: Text(
+                      _isConnecting
+                          ? '等待硬體選擇...'
+                          : _usingHardware
+                              ? '硬體已連線'
+                              : '連接 ThermoCam 硬體',
+                    ),
                   ),
                   const SizedBox(height: 16),
                   Card(

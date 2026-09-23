@@ -19,6 +19,8 @@ class ScanData {
     required this.rssi,
     required this.thermalGrid,
     this.capturedAt,
+    this.irDetected = false,
+    this.wifiDeviceCount = 0,
   }) : assert(thermalGrid.length == 64, 'thermalGrid 必須包含 64 筆資料');
 
   factory ScanData.fromJson(Map<String, dynamic> json) {
@@ -47,11 +49,44 @@ class ScanData {
     );
   }
 
+  factory ScanData.fromHardwareJson(
+    Map<String, dynamic> json, {
+    required String deviceId,
+    required String deviceName,
+  }) {
+    final rawThermal = json['thermal'];
+    if (rawThermal is! List || rawThermal.length != 64) {
+      throw const FormatException('硬體 thermal 必須是長度 64 的陣列');
+    }
+
+    final thermalGrid = rawThermal.map((value) {
+      if (value is num) return value.toDouble();
+      throw const FormatException('硬體 thermal 只能包含數值');
+    }).toList(growable: false);
+
+    final rawRssi = json['rf'];
+    if (rawRssi is! num) {
+      throw const FormatException('硬體 rf 必須是數值');
+    }
+
+    return ScanData(
+      id: '$deviceId-${DateTime.now().microsecondsSinceEpoch}',
+      deviceName: deviceName,
+      rssi: rawRssi.toDouble(),
+      thermalGrid: thermalGrid,
+      capturedAt: DateTime.now().toIso8601String(),
+      irDetected: json['ir'] == 1 || json['ir'] == true,
+      wifiDeviceCount: (json['wifi'] as num?)?.toInt() ?? 0,
+    );
+  }
+
   final String id;
   final String deviceName;
   final double rssi;
   final List<double> thermalGrid;
   final String? capturedAt;
+  final bool irDetected;
+  final int wifiDeviceCount;
 
   ScanResult analyze() => DetectionAnalyzer.evaluate(this);
 }

@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 
 import 'home_page.dart';
+import 'services/database_factory.dart';
 
 // App 入口只負責建立根元件，功能頁面由 HomePage 管理。
 void main() {
+  initializeDatabaseFactory();
   runApp(const AntiPinholeApp());
 }
 
