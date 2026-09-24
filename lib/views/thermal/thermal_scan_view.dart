@@ -1,8 +1,13 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 
+import '../../models/detection_record.dart';
 import '../../models/scan_data.dart';
+import '../../services/database_helper.dart';
+import '../../services/esp32_http_service.dart';
+import '../../services/thermocam_ble_service.dart';
 import '../../services/thermal_simulator.dart';
 import '../../utils/thermal_interpolator.dart';
 import 'dynamic_thermal_painter.dart';
@@ -13,30 +18,113 @@ class ThermalScanView extends StatefulWidget {
   const ThermalScanView({super.key});
 
   @override
-  State<ThermalScanView> createState() => _ThermalScanViewState();
+  State<ThermalScanView> createState() => ThermalScanViewState();
 }
 
-class _ThermalScanViewState extends State<ThermalScanView> {
+class ThermalScanViewState extends State<ThermalScanView> {
   static const _simulator = ThermalSimulator();
+  final _bleService = ThermoCamBleService();
+  final _esp32Service = Esp32HttpService();
   ScanData? _scan;
   List<double>? _interpolatedGrid;
   bool _isScanning = true;
   Timer? _streamTimer;
+  StreamSubscription<ScanData>? _bleSubscription;
+  StreamSubscription<ScanData>? _esp32Subscription;
   String? _alertScanId;
+  String _connectionStatus = '尚未連接硬體，現在顯示模擬資料';
+  bool _usingHardware = false;
+  bool _usingEsp32 = false;
+  bool _isConnecting = false;
+  final Set<String> _persistedRiskScanIds = {};
 
   @override
   void initState() {
     super.initState();
-    _startStream();
-    _runScan();
+    _startSimulatorStream();
   }
 
-  void _runScan() {
-    // 模擬器同步產生一筆新資料；真實硬體接入時可替換此服務實作。
-    _updateScan(_simulator.scan());
+  Future<void> connectHardware() async {
+    if (_isConnecting || _usingHardware || _usingEsp32) return;
+
+    _streamTimer?.cancel();
+    _streamTimer = null;
+    setState(() {
+      _isConnecting = true;
+      _connectionStatus = '請在瀏覽器視窗中選擇 ThermoCam_BLE...';
+    });
+
+    try {
+      await _bleService.connect();
+      _bleSubscription = _bleService.scans.listen(_updateScan);
+      if (mounted) {
+        setState(() {
+          _usingHardware = true;
+          _isScanning = true;
+          _isConnecting = false;
+          _connectionStatus = '已連線 ThermoCam_BLE';
+        });
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _isConnecting = false;
+        _connectionStatus = '藍牙連線失敗：$error，使用模擬資料';
+      });
+      _startSimulatorStream();
+    }
+  }
+
+  Future<void> connectEsp32() async {
+    if (_isConnecting || _usingHardware || _usingEsp32) return;
+
+    _streamTimer?.cancel();
+    _streamTimer = null;
+    setState(() {
+      _isConnecting = true;
+      _connectionStatus = '正在連線 ESP32：172.20.10.3...';
+    });
+
+    _usingEsp32 = true;
+    _esp32Subscription = _esp32Service.scans.listen(
+      _updateScan,
+      onError: (Object error) {
+        if (mounted) setState(() => _connectionStatus = 'ESP32 讀取失敗：$error');
+      },
+    );
+    try {
+      await _esp32Service.start();
+      if (mounted) {
+        setState(() {
+          _isScanning = true;
+          _isConnecting = false;
+          _connectionStatus = '已連線 ESP32 Wi-Fi';
+        });
+      }
+    } catch (error) {
+      _usingEsp32 = false;
+      await _esp32Subscription?.cancel();
+      _esp32Subscription = null;
+      if (!mounted) return;
+      setState(() {
+        _isConnecting = false;
+        _connectionStatus = 'ESP32 連線失敗：$error，使用模擬資料';
+      });
+      _startSimulatorStream();
+    }
   }
 
   void _startStream() {
+    if (_usingHardware) return;
+    if (_usingEsp32) {
+      unawaited(_esp32Service.start());
+      if (mounted) setState(() => _isScanning = true);
+      return;
+    }
+    _startSimulatorStream();
+  }
+
+  void _startSimulatorStream() {
     if (_streamTimer != null) return;
 
     setState(() => _isScanning = true);
@@ -47,6 +135,11 @@ class _ThermalScanViewState extends State<ThermalScanView> {
   }
 
   void _pauseStream() {
+    if (_usingHardware || _usingEsp32) {
+      if (_usingEsp32) unawaited(_esp32Service.stop());
+      setState(() => _isScanning = false);
+      return;
+    }
     _streamTimer?.cancel();
     _streamTimer = null;
     if (mounted) setState(() => _isScanning = false);
@@ -66,6 +159,7 @@ class _ThermalScanViewState extends State<ThermalScanView> {
 
     // 每筆掃描只提示一次，避免畫面重建時重複彈窗。
     if (scan.analyze().isHighRisk && _alertScanId != scan.id) {
+      unawaited(_persistHighRiskScan(scan));
       _pauseStream();
       _alertScanId = scan.id;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -74,10 +168,49 @@ class _ThermalScanViewState extends State<ThermalScanView> {
     }
   }
 
+  Future<void> _persistHighRiskScan(ScanData scan) async {
+    if (_persistedRiskScanIds.contains(scan.id)) return;
+
+    final position = await _getCurrentPosition();
+    if (position == null) return;
+
+    final result = scan.analyze();
+    await DatabaseHelper.instance.insertRecord(
+      DetectionRecord(
+        timestamp: DateTime.now().toUtc(),
+        maxDeltaT: result.deltaT,
+        maxRSSI: result.rssi,
+        latitude: position.latitude,
+        longitude: position.longitude,
+        statusColor: 'RED',
+        userDecision: 'CONFIRMED_DANGER',
+        adviceText: '請立即檢查該位置並依現場安全程序處置。',
+      ),
+    );
+    _persistedRiskScanIds.add(scan.id);
+  }
+
+  Future<Position?> _getCurrentPosition() async {
+    if (!await Geolocator.isLocationServiceEnabled()) return null;
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      return null;
+    }
+    return Geolocator.getCurrentPosition();
+  }
+
   @override
   void dispose() {
     _streamTimer?.cancel();
     _streamTimer = null;
+    _bleSubscription?.cancel();
+    _esp32Subscription?.cancel();
+    _bleService.dispose();
+    _esp32Service.dispose();
     super.dispose();
   }
 
@@ -110,6 +243,38 @@ class _ThermalScanViewState extends State<ThermalScanView> {
                     level: result.level.label,
                     color: levelColor,
                     deviceName: scan.deviceName,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(_connectionStatus),
+                  const SizedBox(height: 16),
+                  OutlinedButton.icon(
+                    onPressed: _isConnecting || _usingHardware || _usingEsp32
+                        ? null
+                        : connectHardware,
+                    icon: _isConnecting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.bluetooth),
+                    label: Text(
+                      _isConnecting
+                          ? '等待硬體選擇...'
+                          : _usingHardware
+                              ? '硬體已連線'
+                              : '連接 ThermoCam 硬體',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: _isConnecting || _usingHardware || _usingEsp32
+                        ? null
+                        : connectEsp32,
+                    icon: const Icon(Icons.router),
+                    label: Text(
+                      _usingEsp32 ? 'ESP32 Wi-Fi 已連線' : '連接 ESP32 Wi-Fi',
+                    ),
                   ),
                   const SizedBox(height: 16),
                   Card(
