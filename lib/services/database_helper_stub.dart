@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/detection_record.dart';
+import 'record_change_notifier.dart';
 
 class DatabaseHelper {
   DatabaseHelper._();
@@ -21,6 +22,7 @@ class DatabaseHelper {
       _storageKey,
       jsonEncode(records.map((item) => item.toMap()).toList()),
     );
+    RecordChangeNotifier.instance.notify(record);
     return record.id ?? records.length;
   }
 

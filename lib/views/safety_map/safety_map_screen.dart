@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../../models/detection_record.dart';
 import '../../services/database_helper.dart';
+import '../../services/record_change_notifier.dart';
 
 class SafetyMapScreen extends StatefulWidget {
   const SafetyMapScreen({super.key});
@@ -14,15 +17,38 @@ class SafetyMapScreen extends StatefulWidget {
 
 class _SafetyMapScreenState extends State<SafetyMapScreen> {
   late Future<List<DetectionRecord>> _recordsFuture;
+  StreamSubscription<DetectionRecord>? _recordSubscription;
+  bool _isRefreshing = false;
 
   @override
   void initState() {
     super.initState();
     _reloadRecords();
+    _recordSubscription = RecordChangeNotifier.instance.changes.listen((_) {
+      if (mounted) setState(_reloadRecords);
+    });
+  }
+
+  @override
+  void dispose() {
+    _recordSubscription?.cancel();
+    super.dispose();
   }
 
   void _reloadRecords() {
     _recordsFuture = DatabaseHelper.instance.getAllRecords();
+  }
+
+  Future<void> _refreshMap() async {
+    setState(() {
+      _isRefreshing = true;
+      _reloadRecords();
+    });
+    try {
+      await _recordsFuture;
+    } finally {
+      if (mounted) setState(() => _isRefreshing = false);
+    }
   }
 
   @override
@@ -63,18 +89,42 @@ class _SafetyMapScreenState extends State<SafetyMapScreen> {
             Positioned(
               top: 12,
               right: 12,
-              child: Card(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Card(
+                    child: TextButton.icon(
+                      onPressed: _isRefreshing ? null : _refreshMap,
+                      icon: _isRefreshing
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.refresh),
+                      label: const Text('重新整理'),
+                    ),
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      _LegendItem(color: Colors.red, label: '確認高風險'),
-                      _LegendItem(color: Colors.amber, label: '待驗證疑慮'),
-                    ],
+                ],
+              ),
+            ),
+            Positioned(
+              left: 12,
+              bottom: 12,
+              child: SafeArea(
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        _LegendItem(color: Colors.red, label: '確認高風險'),
+                        _LegendItem(color: Colors.amber, label: '待驗證疑慮'),
+                      ],
+                    ),
                   ),
                 ),
               ),

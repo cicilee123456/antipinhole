@@ -80,6 +80,27 @@ class ScanData {
     );
   }
 
+  factory ScanData.fromEsp32Json(Map<String, dynamic> json) {
+    final rawPixels = json['pixels'];
+    if (rawPixels is! List || rawPixels.length != 64) {
+      throw const FormatException('ESP32 pixels 必須是長度 64 的陣列');
+    }
+
+    final thermalGrid = rawPixels.map((value) {
+      if (value is num) return value.toDouble();
+      throw const FormatException('ESP32 pixels 只能包含數值');
+    }).toList(growable: false);
+
+    return ScanData(
+      id: 'esp32-${DateTime.now().microsecondsSinceEpoch}',
+      deviceName: json['device_name']?.toString() ?? 'ESP32 Thermal Sensor',
+      rssi: (json['rssi'] as num?)?.toDouble() ?? -70.0,
+      thermalGrid: thermalGrid,
+      capturedAt: json['captured_at']?.toString() ??
+          DateTime.now().toIso8601String(),
+    );
+  }
+
   final String id;
   final String deviceName;
   final double rssi;

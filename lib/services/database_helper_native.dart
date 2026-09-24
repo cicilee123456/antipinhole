@@ -1,6 +1,7 @@
 import 'package:sqflite/sqflite.dart';
 
 import '../models/detection_record.dart';
+import 'record_change_notifier.dart';
 
 class DatabaseHelper {
   DatabaseHelper._();
@@ -42,11 +43,13 @@ class DatabaseHelper {
   }
 
   Future<int> insertRecord(DetectionRecord record) async {
-    return (await database).insert(
+    final id = await (await database).insert(
       tableName,
       record.toMap(),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
+    RecordChangeNotifier.instance.notify(record);
+    return id;
   }
 
   Future<List<DetectionRecord>> getAllRecords() async {

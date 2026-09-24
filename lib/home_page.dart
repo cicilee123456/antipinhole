@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'views/history/history_view.dart';
+import 'views/hardware/hardware_monitor_view.dart';
 import 'views/settings/settings_view.dart';
 import 'views/thermal/thermal_scan_view.dart';
 import 'views/safety_map/safety_map_screen.dart';
@@ -18,10 +19,18 @@ class _HomePageState extends State<HomePage> {
   final _thermalKey = GlobalKey<ThermalScanViewState>();
 
   // IndexedStack 保留各頁面的狀態，例如切換分頁後不會重置掃描畫面。
-  static const _pageTitles = ['總覽 Dashboard', '熱成像掃描', 'Safety Map', '歷史紀錄', '系統設定'];
+  static const _pageTitles = [
+    '總覽 Dashboard',
+    '熱成像掃描',
+    '硬體監控',
+    '安全地圖',
+    '歷史紀錄',
+    '系統設定',
+  ];
   late final _pages = <Widget>[
     _DashboardView(onHardwareTap: _openHardwarePairing),
     ThermalScanView(key: _thermalKey),
+    const HardwareMonitorView(),
     const HistoryView(),
     const SafetyMapScreen(),
     const SettingsView(),
@@ -48,8 +57,9 @@ class _HomePageState extends State<HomePage> {
         destinations: const [
           NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard), label: '總覽'),
           NavigationDestination(icon: Icon(Icons.thermostat_outlined), selectedIcon: Icon(Icons.thermostat), label: '熱成像'),
+          NavigationDestination(icon: Icon(Icons.monitor_heart_outlined), selectedIcon: Icon(Icons.monitor_heart), label: '硬體監控'),
           NavigationDestination(icon: Icon(Icons.history), label: '歷史'),
-          NavigationDestination(icon: Icon(Icons.map_outlined), selectedIcon: Icon(Icons.map), label: 'Safety Map'),
+          NavigationDestination(icon: Icon(Icons.map_outlined), selectedIcon: Icon(Icons.map), label: '安全地圖'),
           NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: '設定'),
         ],
       ),
