@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'views/history/history_view.dart';
+import 'views/hardware/cc1101_diagnostic_view.dart';
 import 'views/hardware/hardware_monitor_view.dart';
 import 'views/settings/settings_view.dart';
 import 'views/thermal/thermal_scan_view.dart';
@@ -23,14 +24,19 @@ class _HomePageState extends State<HomePage> {
     '總覽 Dashboard',
     '熱成像掃描',
     '硬體監控',
-    '安全地圖',
+    'CC1101 診斷',
     '歷史紀錄',
+    '安全地圖',
     '系統設定',
   ];
   late final _pages = <Widget>[
-    _DashboardView(onHardwareTap: _openHardwarePairing),
+    _DashboardView(
+      onHardwareTap: _openHardwarePairing,
+      onCc1101Tap: _openCc1101Diagnostics,
+    ),
     ThermalScanView(key: _thermalKey),
     const HardwareMonitorView(),
+    const Cc1101DiagnosticView(),
     const HistoryView(),
     const SafetyMapScreen(),
     const SettingsView(),
@@ -41,6 +47,10 @@ class _HomePageState extends State<HomePage> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _thermalKey.currentState?.connectHardware();
     });
+  }
+
+  void _openCc1101Diagnostics() {
+    setState(() => _selectedIndex = 3);
   }
 
   @override
@@ -58,6 +68,7 @@ class _HomePageState extends State<HomePage> {
           NavigationDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard), label: '總覽'),
           NavigationDestination(icon: Icon(Icons.thermostat_outlined), selectedIcon: Icon(Icons.thermostat), label: '熱成像'),
           NavigationDestination(icon: Icon(Icons.monitor_heart_outlined), selectedIcon: Icon(Icons.monitor_heart), label: '硬體監控'),
+          NavigationDestination(icon: Icon(Icons.wifi_tethering_outlined), selectedIcon: Icon(Icons.wifi_tethering), label: 'CC1101'),
           NavigationDestination(icon: Icon(Icons.history), label: '歷史'),
           NavigationDestination(icon: Icon(Icons.map_outlined), selectedIcon: Icon(Icons.map), label: '安全地圖'),
           NavigationDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: '設定'),
@@ -68,9 +79,13 @@ class _HomePageState extends State<HomePage> {
 }
 
 class _DashboardView extends StatelessWidget {
-  const _DashboardView({required this.onHardwareTap});
+  const _DashboardView({
+    required this.onHardwareTap,
+    required this.onCc1101Tap,
+  });
 
   final VoidCallback onHardwareTap;
+  final VoidCallback onCc1101Tap;
 
   @override
   Widget build(BuildContext context) {
@@ -82,6 +97,13 @@ class _DashboardView extends StatelessWidget {
       childAspectRatio: 1.8,
       children: [
         const _DashboardCard(icon: Icons.thermostat, title: '熱成像掃描', description: '查看即時熱點與風險判定', color: Colors.deepOrange),
+        _DashboardCard(
+          icon: Icons.wifi_tethering,
+          title: 'CC1101 診斷',
+          description: '獨立測試 RSSI、LQI 與封包品質',
+          color: Colors.blueGrey,
+          onTap: onCc1101Tap,
+        ),
         const _DashboardCard(icon: Icons.history, title: '歷史紀錄', description: '查看過往掃描結果', color: Colors.indigo),
         _DashboardCard(
           icon: Icons.bluetooth,

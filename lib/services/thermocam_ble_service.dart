@@ -121,6 +121,35 @@ class ThermoCamBleService {
     String? deviceId,
     String? deviceName,
   }) {
+    final resolvedDeviceId = deviceId ?? _device?.remoteId.str ?? 'thermocam';
+    final resolvedDeviceName = deviceName ??
+        (_device?.platformName.isNotEmpty == true
+            ? _device!.platformName
+            : ThermoCamBleService.deviceName);
+    if (value.length == 132) {
+      final rawText = 'binary SensorPayload (132 bytes): ${_toHex(value)}';
+      try {
+        final scan = ScanData.fromHardwareBinary(
+          value,
+          deviceId: resolvedDeviceId,
+          deviceName: resolvedDeviceName,
+        );
+        HardwareDataMonitor.instance.add(
+          source: 'BLE binary',
+          rawText: rawText,
+          scan: scan,
+        );
+        _scanController.add(scan);
+      } on FormatException catch (error) {
+        HardwareDataMonitor.instance.add(
+          source: 'BLE binary',
+          rawText: rawText,
+          error: error.message,
+        );
+      }
+      return;
+    }
+
     final rawText = utf8.decode(value, allowMalformed: true);
     try {
       final decoded = jsonDecode(rawText);
@@ -129,10 +158,8 @@ class ThermoCamBleService {
       }
       final scan = ScanData.fromHardwareJson(
         decoded,
-        deviceId: deviceId ?? _device?.remoteId.str ?? 'thermocam',
-        deviceName: deviceName ?? (_device?.platformName.isNotEmpty == true
-            ? _device!.platformName
-            : ThermoCamBleService.deviceName),
+        deviceId: resolvedDeviceId,
+        deviceName: resolvedDeviceName,
       );
       HardwareDataMonitor.instance.add(
         source: 'BLE',
@@ -156,6 +183,10 @@ class ThermoCamBleService {
       // 忽略不完整或格式錯誤的單筆通知，等待下一筆完整資料。
     }
   }
+
+  String _toHex(List<int> bytes) => bytes
+      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+      .join(' ');
 
   Future<void> dispose() async {
     await _valueSubscription?.cancel();
