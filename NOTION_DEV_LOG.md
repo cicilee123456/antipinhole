@@ -282,3 +282,38 @@ C:\SDK\flutter\bin\flutter.bat run -d chrome --web-port 8080
 目前系統已具備「硬體資料進入 App → 轉換為 ScanData → 顯示熱成像與風險分析 → 建立地圖資料基礎」的主要骨架。
 
 下一階段重點是完成 GPS、自動事件寫入、Web 持久化與 Offline First 流程。
+
+---
+
+# 2026-09-30 工作日誌補充
+
+## 今日工作摘要
+
+本次整理 App 主導覽與啟動平台設定，並處理 Web 頁面未顯示的問題。
+
+## 主導覽與頁面切換
+
+- 移除首頁 Dashboard，預設分頁改為「熱成像掃描」。
+- 底部導覽列保留「熱成像」、「硬體監控」、「安全地圖」三項。
+- Drawer 提供「熱成像」、「硬體監控」、「安全地圖」、「設定」、「關於」五項入口。
+- 將 Drawer 項目的切換統一由 `_selectedIndex` 控制，並對應 `IndexedStack` 頁面順序。
+- Drawer 關閉改用 `ScaffoldState.closeDrawer()`，避免用 `Navigator.pop(context)` 造成路由被彈出的風險。
+- 設定與關於目前建立為空白頁；歷史紀錄模組保留，但不列入本次五個主要導覽項目。
+
+## Web 與 Windows 平台
+
+- 加入 Flutter Web 與 Windows 平台專案檔，建立時保留既有 Web 資產。
+- 啟用 Flutter Windows 桌面開發設定。
+- `flutter build web` 成功，產物位於 `build/web`。
+- `flutter build windows` 成功，產物位於 `build/windows/x64/runner/Release/anti_pinhole.exe`。
+
+## 驗證結果與待追蹤
+
+```text
+flutter analyze：No issues found
+flutter test test/database_factory_test.dart：成功
+flutter build web：成功
+flutter build windows：成功
+```
+
+Web 專案建置成功，但透過 Chrome 啟動時工具曾逾時；使用 Web Server 模式啟動後，尚未確認瀏覽器頁面實際顯示。後續需確認 `flutter run -d web-server --web-port 8080` 完成啟動，並於 `http://localhost:8080` 驗證畫面。
