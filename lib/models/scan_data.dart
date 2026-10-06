@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'dart:math' as math;
 
 // 風險等級的數值與顯示文字集中管理，避免 UI 各自定義門檻名稱。
@@ -80,6 +82,36 @@ class ScanData {
     );
   }
 
+  factory ScanData.fromHardwareBinary(
+    List<int> payload, {
+    required String deviceId,
+    required String deviceName,
+  }) {
+    if (payload.length != 132) {
+      throw FormatException(
+        'BLE SensorPayload 長度必須是 132 bytes，實際為 ${payload.length}',
+      );
+    }
+
+    final bytes = Uint8List.fromList(payload);
+    final data = ByteData.sublistView(bytes);
+    final thermalGrid = List<double>.generate(
+      64,
+      (index) => data.getInt16(index * 2, Endian.little) / 10.0,
+      growable: false,
+    );
+
+    return ScanData(
+      id: '$deviceId-${DateTime.now().microsecondsSinceEpoch}',
+      deviceName: deviceName,
+      rssi: data.getInt16(128, Endian.little).toDouble(),
+      thermalGrid: thermalGrid,
+      capturedAt: DateTime.now().toIso8601String(),
+      irDetected: bytes[130] != 0,
+      wifiDeviceCount: bytes[131],
+    );
+  }
+
   factory ScanData.fromEsp32Json(Map<String, dynamic> json) {
     final rawPixels = json['pixels'];
     if (rawPixels is! List || rawPixels.length != 64) {
@@ -94,10 +126,14 @@ class ScanData {
     return ScanData(
       id: 'esp32-${DateTime.now().microsecondsSinceEpoch}',
       deviceName: json['device_name']?.toString() ?? 'ESP32 Thermal Sensor',
-      rssi: (json['rssi'] as num?)?.toDouble() ?? -70.0,
+      rssi: ((json['rf_rssi'] ?? json['rssi']) as num?)?.toDouble() ?? -70.0,
       thermalGrid: thermalGrid,
       capturedAt: json['captured_at']?.toString() ??
           DateTime.now().toIso8601String(),
+      irDetected: json['ir'] == 1 || json['ir'] == true,
+      wifiDeviceCount: (json['wifi_devices'] as num?)?.toInt() ??
+          (json['wifi'] as num?)?.toInt() ??
+          0,
     );
   }
 

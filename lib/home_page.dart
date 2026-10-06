@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'views/about/about_view.dart';
+import 'views/hardware/cc1101_diagnostic_view.dart';
 import 'views/hardware/hardware_monitor_view.dart';
 import 'views/settings/settings_view.dart';
 import 'views/thermal/thermal_scan_view.dart';
@@ -52,6 +53,18 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  void _openCc1101Diagnostics() {
+    _scaffoldKey.currentState?.closeDrawer();
+    Navigator.of(context).push<void>(
+      MaterialPageRoute<void>(
+        builder: (_) => Scaffold(
+          appBar: AppBar(title: const Text('CC1101 診斷')),
+          body: const Cc1101DiagnosticView(),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -74,6 +87,11 @@ class _HomePageState extends State<HomePage> {
                   index: 0, icon: Icons.thermostat_outlined, label: '熱成像'),
               _drawerItem(
                   index: 1, icon: Icons.monitor_heart_outlined, label: '硬體監控'),
+              ListTile(
+                leading: const Icon(Icons.wifi_tethering_outlined),
+                title: const Text('CC1101 診斷'),
+                onTap: _openCc1101Diagnostics,
+              ),
               _drawerItem(index: 2, icon: Icons.map_outlined, label: '安全地圖'),
               _drawerItem(index: 3, icon: Icons.settings_outlined, label: '設定'),
               _drawerItem(index: 4, icon: Icons.info_outline, label: '關於'),
@@ -142,3 +160,6 @@ class _HomePageState extends State<HomePage> {
         ),
       )
     : null,
+    );
+  }
+}
