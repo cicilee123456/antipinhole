@@ -128,8 +128,8 @@ class ScanData {
       deviceName: json['device_name']?.toString() ?? 'ESP32 Thermal Sensor',
       rssi: ((json['rf_rssi'] ?? json['rssi']) as num?)?.toDouble() ?? -70.0,
       thermalGrid: thermalGrid,
-      capturedAt: json['captured_at']?.toString() ??
-          DateTime.now().toIso8601String(),
+      capturedAt:
+          json['captured_at']?.toString() ?? DateTime.now().toIso8601String(),
       irDetected: json['ir'] == 1 || json['ir'] == true,
       wifiDeviceCount: (json['wifi_devices'] as num?)?.toInt() ??
           (json['wifi'] as num?)?.toInt() ??
@@ -176,22 +176,10 @@ class DetectionAnalyzer {
     final maximumTemperature = scan.thermalGrid.reduce(math.max);
     final deltaT = maximumTemperature - minimumTemperature;
 
-    // 高風險必須同時滿足溫差與訊號門檻；警示則任一條件成立即可。
-    final highThermalDelta = deltaT >= 6.0;
-    final strongSignal = scan.rssi >= -50.0;
-    final warningThermalDelta = deltaT >= 4.0;
-    final warningSignal = scan.rssi >= -65.0;
-
-    final level = highThermalDelta && strongSignal
-        ? DetectionLevel.highRisk
-        : warningThermalDelta || warningSignal
-            ? DetectionLevel.warning
-            : DetectionLevel.safe;
-
-    // 加權分數供後續排序或報表使用，不取代上方明確的等級判定。
-    final thermalScore = ((deltaT / 6.0) * 0.6).clamp(0.0, 0.6);
-    final signalScore = (((scan.rssi + 100.0) / 50.0) * 0.4)
-        .clamp(0.0, 0.4);
+    // 暫時測試規則：只要 RSSI 高於 -89 dBm 就觸發高風險告警。
+    final level =
+        scan.rssi > -89.0 ? DetectionLevel.highRisk : DetectionLevel.safe;
+    final weightedScore = ((scan.rssi + 89.0) / 89.0).clamp(0.0, 1.0);
 
     return ScanResult(
       level: level,
@@ -199,7 +187,7 @@ class DetectionAnalyzer {
       minimumTemperature: minimumTemperature,
       maximumTemperature: maximumTemperature,
       rssi: scan.rssi,
-      weightedScore: thermalScore + signalScore,
+      weightedScore: weightedScore,
     );
   }
 }
