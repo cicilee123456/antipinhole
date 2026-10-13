@@ -27,12 +27,12 @@ class ThermalScanViewState extends State<ThermalScanView> {
   final _esp32Service = Esp32HttpService();
   ScanData? _scan;
   List<double>? _interpolatedGrid;
-  bool _isScanning = true;
+  bool _isScanning = false;
   Timer? _streamTimer;
   StreamSubscription<ScanData>? _bleSubscription;
   StreamSubscription<ScanData>? _esp32Subscription;
   String? _alertScanId;
-  String _connectionStatus = '尚未連接硬體，現在顯示模擬資料';
+  String _connectionStatus = '尚未連接硬體，按「開始即時掃描」可使用模擬資料';
   bool _usingHardware = false;
   bool _usingEsp32 = false;
   bool _isConnecting = false;
@@ -41,7 +41,6 @@ class ThermalScanViewState extends State<ThermalScanView> {
   @override
   void initState() {
     super.initState();
-    _startSimulatorStream();
   }
 
   Future<void> connectHardware() async {
@@ -69,9 +68,8 @@ class ThermalScanViewState extends State<ThermalScanView> {
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
-        _connectionStatus = '藍牙連線失敗：$error，使用模擬資料';
+        _connectionStatus = '藍牙連線失敗：$error，按「開始即時掃描」使用模擬資料';
       });
-      _startSimulatorStream();
     }
   }
 
@@ -108,9 +106,8 @@ class ThermalScanViewState extends State<ThermalScanView> {
       if (!mounted) return;
       setState(() {
         _isConnecting = false;
-        _connectionStatus = 'ESP32 連線失敗：$error，使用模擬資料';
+        _connectionStatus = 'ESP32 連線失敗：$error，按「開始即時掃描」使用模擬資料';
       });
-      _startSimulatorStream();
     }
   }
 
@@ -218,16 +215,14 @@ class ThermalScanViewState extends State<ThermalScanView> {
   Widget build(BuildContext context) {
     final scan = _scan;
     final interpolatedGrid = _interpolatedGrid;
-    if (scan == null || interpolatedGrid == null) {
-      return const Center(child: CircularProgressIndicator());
-    }
-
-    final result = scan.analyze();
-    final levelColor = switch (result.level) {
-      DetectionLevel.safe => Colors.green,
-      DetectionLevel.warning => Colors.orange,
-      DetectionLevel.highRisk => Colors.red,
-    };
+    final result = scan?.analyze();
+    final levelColor = result == null
+        ? Theme.of(context).colorScheme.outline
+        : switch (result.level) {
+            DetectionLevel.safe => Colors.green,
+            DetectionLevel.warning => Colors.orange,
+            DetectionLevel.highRisk => Colors.red,
+          };
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -239,11 +234,14 @@ class ThermalScanViewState extends State<ThermalScanView> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  _StatusCard(
-                    level: result.level.label,
-                    color: levelColor,
-                    deviceName: scan.deviceName,
-                  ),
+                  if (result != null)
+                    _StatusCard(
+                      level: result.level.label,
+                      color: levelColor,
+                      deviceName: scan!.deviceName,
+                    )
+                  else
+                    const Text('尚未開始掃描'),
                   const SizedBox(height: 8),
                   Text(_connectionStatus),
                   const SizedBox(height: 16),
@@ -277,43 +275,45 @@ class ThermalScanViewState extends State<ThermalScanView> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: AspectRatio(
-                        aspectRatio: 1,
-                        child: CustomPaint(
-                          painter: DynamicThermalPainter(
-                            grid64x64: interpolatedGrid,
-                            minTemp: result.minimumTemperature,
-                            maxTemp: result.maximumTemperature,
+                  if (result != null && interpolatedGrid != null) ...[
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: AspectRatio(
+                          aspectRatio: 1,
+                          child: CustomPaint(
+                            painter: DynamicThermalPainter(
+                              grid64x64: interpolatedGrid,
+                              minTemp: result.minimumTemperature,
+                              maxTemp: result.maximumTemperature,
+                            ),
+                            child: const SizedBox.expand(),
                           ),
-                          child: const SizedBox.expand(),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(height: 16),
-                  Card(
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Wrap(
-                        alignment: WrapAlignment.spaceBetween,
-                        spacing: 32,
-                        runSpacing: 16,
-                        children: [
-                          _Metric(
-                            label: '溫差 ΔT',
-                            value: '${result.deltaT.toStringAsFixed(1)} °C',
-                          ),
-                          _Metric(
-                            label: 'RSSI',
-                            value: '${result.rssi.toStringAsFixed(1)} dBm',
-                          ),
-                        ],
+                    const SizedBox(height: 16),
+                    Card(
+                      child: Padding(
+                        padding: const EdgeInsets.all(20),
+                        child: Wrap(
+                          alignment: WrapAlignment.spaceBetween,
+                          spacing: 32,
+                          runSpacing: 16,
+                          children: [
+                            _Metric(
+                              label: '溫差 ΔT',
+                              value: '${result.deltaT.toStringAsFixed(1)} °C',
+                            ),
+                            _Metric(
+                              label: 'RSSI',
+                              value: '${result.rssi.toStringAsFixed(1)} dBm',
+                            ),
+                          ],
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                   const SizedBox(height: 16),
                   FilledButton.icon(
                     onPressed: _isScanning ? _pauseStream : _startStream,

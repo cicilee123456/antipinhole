@@ -17,6 +17,7 @@ dependencies:
   shared_preferences: ^2.5.3
   latlong2: ^0.9.1
   sqflite: ^2.3.3+1
+  sqflite_common_ffi: ^2.3.3+1
   flutter_map_cache: ^2.1.0
   http_cache_sembast_store: ^1.0.1
   sembast: ^3.8.7
