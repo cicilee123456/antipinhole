@@ -10,7 +10,7 @@ import '../../services/esp32_http_service.dart';
 import '../../services/thermocam_ble_service.dart';
 import '../../services/thermal_simulator.dart';
 import '../../utils/thermal_interpolator.dart';
-import 'dynamic_thermal_painter.dart';
+import 'thermal_heatmap64_view.dart';
 import 'sop_dialog.dart';
 
 // 熱成像子模組：負責產生掃描、顯示熱圖與呈現風險結果。
@@ -26,7 +26,7 @@ class ThermalScanViewState extends State<ThermalScanView> {
   final _bleService = ThermoCamBleService();
   final _esp32Service = Esp32HttpService();
   ScanData? _scan;
-  List<double>? _interpolatedGrid;
+  List<List<double>>? _grid64x64;
   bool _isScanning = false;
   Timer? _streamTimer;
   StreamSubscription<ScanData>? _bleSubscription;
@@ -151,7 +151,15 @@ class ThermalScanViewState extends State<ThermalScanView> {
     if (!mounted) return;
     setState(() {
       _scan = scan;
-      _interpolatedGrid = interpolatedGrid;
+      _grid64x64 = List<List<double>>.generate(
+        64,
+        (row) => List<double>.generate(
+          64,
+          (column) => interpolatedGrid[row * 64 + column],
+          growable: false,
+        ),
+        growable: false,
+      );
     });
 
     // 每筆掃描只提示一次，避免畫面重建時重複彈窗。
@@ -214,7 +222,7 @@ class ThermalScanViewState extends State<ThermalScanView> {
   @override
   Widget build(BuildContext context) {
     final scan = _scan;
-    final interpolatedGrid = _interpolatedGrid;
+    final grid64x64 = _grid64x64;
     final result = scan?.analyze();
     final levelColor = result == null
         ? Theme.of(context).colorScheme.outline
@@ -275,22 +283,12 @@ class ThermalScanViewState extends State<ThermalScanView> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  if (result != null && interpolatedGrid != null) ...[
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(20),
-                        child: AspectRatio(
-                          aspectRatio: 1,
-                          child: CustomPaint(
-                            painter: DynamicThermalPainter(
-                              grid64x64: interpolatedGrid,
-                              minTemp: result.minimumTemperature,
-                              maxTemp: result.maximumTemperature,
-                            ),
-                            child: const SizedBox.expand(),
-                          ),
-                        ),
-                      ),
+                  if (grid64x64 != null && result != null) ...[
+                    ThermalHeatmap64View(
+                      temperatures: grid64x64,
+                      minTemp: 20.0,
+                      maxTemp: 40.0,
+                      warningThreshold: 35.0,
                     ),
                     const SizedBox(height: 16),
                     Card(
@@ -356,9 +354,9 @@ class _StatusCard extends StatelessWidget {
             Text(
               level,
               style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                color: color,
-                fontWeight: FontWeight.bold,
-              ),
+                    color: color,
+                    fontWeight: FontWeight.bold,
+                  ),
             ),
             Text(deviceName),
           ],
