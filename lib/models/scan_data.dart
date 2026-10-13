@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'dart:math' as math;
 
 // 風險等級的數值與顯示文字集中管理，避免 UI 各自定義門檻名稱。
@@ -80,6 +82,36 @@ class ScanData {
     );
   }
 
+  factory ScanData.fromHardwareBinary(
+    List<int> payload, {
+    required String deviceId,
+    required String deviceName,
+  }) {
+    if (payload.length != 132) {
+      throw FormatException(
+        'BLE SensorPayload 長度必須是 132 bytes，實際為 ${payload.length}',
+      );
+    }
+
+    final bytes = Uint8List.fromList(payload);
+    final data = ByteData.sublistView(bytes);
+    final thermalGrid = List<double>.generate(
+      64,
+      (index) => data.getInt16(index * 2, Endian.little) / 10.0,
+      growable: false,
+    );
+
+    return ScanData(
+      id: '$deviceId-${DateTime.now().microsecondsSinceEpoch}',
+      deviceName: deviceName,
+      rssi: data.getInt16(128, Endian.little).toDouble(),
+      thermalGrid: thermalGrid,
+      capturedAt: DateTime.now().toIso8601String(),
+      irDetected: bytes[130] != 0,
+      wifiDeviceCount: bytes[131],
+    );
+  }
+
   factory ScanData.fromEsp32Json(Map<String, dynamic> json) {
     final rawPixels = json['pixels'];
     if (rawPixels is! List || rawPixels.length != 64) {
@@ -94,10 +126,14 @@ class ScanData {
     return ScanData(
       id: 'esp32-${DateTime.now().microsecondsSinceEpoch}',
       deviceName: json['device_name']?.toString() ?? 'ESP32 Thermal Sensor',
-      rssi: (json['rssi'] as num?)?.toDouble() ?? -70.0,
+      rssi: ((json['rf_rssi'] ?? json['rssi']) as num?)?.toDouble() ?? -70.0,
       thermalGrid: thermalGrid,
-      capturedAt: json['captured_at']?.toString() ??
-          DateTime.now().toIso8601String(),
+      capturedAt:
+          json['captured_at']?.toString() ?? DateTime.now().toIso8601String(),
+      irDetected: json['ir'] == 1 || json['ir'] == true,
+      wifiDeviceCount: (json['wifi_devices'] as num?)?.toInt() ??
+          (json['wifi'] as num?)?.toInt() ??
+          0,
     );
   }
 
@@ -140,22 +176,10 @@ class DetectionAnalyzer {
     final maximumTemperature = scan.thermalGrid.reduce(math.max);
     final deltaT = maximumTemperature - minimumTemperature;
 
-    // 高風險必須同時滿足溫差與訊號門檻；警示則任一條件成立即可。
-    final highThermalDelta = deltaT >= 6.0;
-    final strongSignal = scan.rssi >= -50.0;
-    final warningThermalDelta = deltaT >= 4.0;
-    final warningSignal = scan.rssi >= -65.0;
-
-    final level = highThermalDelta && strongSignal
-        ? DetectionLevel.highRisk
-        : warningThermalDelta || warningSignal
-            ? DetectionLevel.warning
-            : DetectionLevel.safe;
-
-    // 加權分數供後續排序或報表使用，不取代上方明確的等級判定。
-    final thermalScore = ((deltaT / 6.0) * 0.6).clamp(0.0, 0.6);
-    final signalScore = (((scan.rssi + 100.0) / 50.0) * 0.4)
-        .clamp(0.0, 0.4);
+    // 暫時測試規則：只要 RSSI 高於 -89 dBm 就觸發高風險告警。
+    final level =
+        scan.rssi > -89.0 ? DetectionLevel.highRisk : DetectionLevel.safe;
+    final weightedScore = ((scan.rssi + 89.0) / 89.0).clamp(0.0, 1.0);
 
     return ScanResult(
       level: level,
@@ -163,7 +187,7 @@ class DetectionAnalyzer {
       minimumTemperature: minimumTemperature,
       maximumTemperature: maximumTemperature,
       rssi: scan.rssi,
-      weightedScore: thermalScore + signalScore,
+      weightedScore: weightedScore,
     );
   }
 }

@@ -18,7 +18,7 @@ class AntiPinholeApp extends StatelessWidget {
     return MaterialApp(
       title: 'Anti-Pinhole Detector',
       theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo),
+        colorScheme: ColorScheme.fromSeed(seedColor: Color(0xFFAEB8C4)),
         useMaterial3: true,
       ),
       home: const HomePage(),
