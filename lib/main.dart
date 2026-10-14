@@ -17,6 +17,7 @@ class AntiPinholeApp extends StatelessWidget {
     // 全域主題集中在入口設定，方便後續替換品牌色或 Material 設計。
     return MaterialApp(
       title: 'Anti-Pinhole Detector',
+      debugShowCheckedModeBanner: false,
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Color(0xFFAEB8C4)),
         useMaterial3: true,
