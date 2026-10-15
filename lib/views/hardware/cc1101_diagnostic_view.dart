@@ -5,8 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'package:geolocator/geolocator.dart';
+
+import '../../models/detection_record.dart';
 import '../../models/cc1101_diagnostic_sample.dart';
 import '../../services/cc1101_diagnostic_service.dart';
+import '../../services/database_helper.dart';
 import '../thermal/sop_dialog.dart';
 
 class Cc1101DiagnosticView extends StatefulWidget {
@@ -26,7 +30,10 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
   String? _error;
   bool _isRunning = false;
   bool _useBluetooth = false;
-  bool _riskAlertShown = false;
+  bool _isSopActive = false;
+  bool _riskEpisodeHandled = false;
+  DateTime? _lastSopClosedTime;
+  static const _sopCooldown = Duration(seconds: 20);
 
   @override
   void initState() {
@@ -71,7 +78,6 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
     _subscription = null;
     if (mounted) {
       setState(() => _isRunning = false);
-      _riskAlertShown = false;
     }
   }
 
@@ -89,22 +95,92 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
   void _checkRiskAutomatically(Cc1101DiagnosticSample sample) {
     final rssi = sample.rssi;
     if (rssi == null || rssi <= _riskRssiThreshold) {
-      _riskAlertShown = false;
+      _riskEpisodeHandled = false;
       return;
     }
-    if (_riskAlertShown) return;
+    if (_riskEpisodeHandled) return;
+    if (_isSopActive) return;
+    final lastClosed = _lastSopClosedTime;
+    if (lastClosed != null &&
+        DateTime.now().difference(lastClosed) < _sopCooldown) {
+      return;
+    }
 
-    _riskAlertShown = true;
+    _riskEpisodeHandled = true;
+    _isSopActive = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      unawaited(SopDialog.show(context));
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('自動偵測高風險：RSSI $rssi dBm > $_riskRssiThreshold dBm'),
-          backgroundColor: Colors.red,
-        ),
-      );
+      _handleSop(sample, rssi);
     });
+  }
+
+  Future<void> _handleSop(
+    Cc1101DiagnosticSample sample,
+    double rssi,
+  ) async {
+    try {
+      final decision = await SopDialog.show(context);
+      if (decision != null) {
+        final persisted = await _persistSopDecision(sample, decision);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                persisted
+                    ? decision == SopDecision.confirmedDanger
+                        ? '複檢異常：已記錄紅色高風險事件'
+                        : '複檢正常：已記錄黃色待驗證事件'
+                    : '定位服務不可用，無法寫入事件紀錄',
+              ),
+              backgroundColor: persisted
+                  ? decision == SopDecision.confirmedDanger
+                      ? Colors.red
+                      : Colors.amber.shade800
+                  : Colors.orange,
+            ),
+          );
+        }
+      } else if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('SOP 已關閉，未建立事件紀錄')),
+        );
+      }
+    } finally {
+      _isSopActive = false;
+      _lastSopClosedTime = DateTime.now();
+    }
+  }
+
+  Future<bool> _persistSopDecision(
+    Cc1101DiagnosticSample sample,
+    SopDecision decision,
+  ) async {
+    if (!await Geolocator.isLocationServiceEnabled()) return false;
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      return false;
+    }
+    final position = await Geolocator.getCurrentPosition();
+    final isDanger = decision == SopDecision.confirmedDanger;
+    await DatabaseHelper.instance.insertRecord(
+      DetectionRecord(
+        timestamp: DateTime.now().toUtc(),
+        maxDeltaT: 0,
+        maxRSSI: sample.rssi ?? 0,
+        latitude: position.latitude,
+        longitude: position.longitude,
+        statusColor: isDanger ? 'RED' : 'YELLOW',
+        userDecision: isDanger ? 'CONFIRMED_DANGER' : 'UNCERTAIN_WARNING',
+        adviceText: isDanger
+            ? '複檢異常：請立即檢查該位置並依現場安全程序處置。'
+            : '複檢正常（疑似誤判）：建議貼膠帶遮蔽可疑位置或拔除電源後再驗證。',
+      ),
+    );
+    return true;
   }
 
   Future<void> _loadSamples() async {

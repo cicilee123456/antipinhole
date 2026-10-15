@@ -1,15 +1,40 @@
 import 'package:flutter/material.dart';
 
+enum SopDecision {
+  confirmedDanger,
+  uncertainWarning,
+}
+
 // 高風險時的人工排查流程，與熱成像頁面保持獨立以便日後擴充。
 class SopDialog extends StatelessWidget {
   const SopDialog({super.key});
 
-  static Future<void> show(BuildContext context) {
-    return showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const SopDialog(),
-    );
+  static bool _isShowing = false;
+  static DateTime? _lastClosedTime;
+  static const _cooldown = Duration(seconds: 20);
+
+  static Future<SopDecision?> show(BuildContext context) async {
+    if (_isShowing) return null;
+    final lastClosedTime = _lastClosedTime;
+    if (lastClosedTime != null &&
+        DateTime.now().difference(lastClosedTime) < _cooldown) {
+      return null;
+    }
+
+    _isShowing = true;
+    try {
+      return await showDialog<SopDecision>(
+        context: context,
+        barrierDismissible: false,
+        builder: (_) => const PopScope(
+          canPop: false,
+          child: SopDialog(),
+        ),
+      );
+    } finally {
+      _isShowing = false;
+      _lastClosedTime = DateTime.now();
+    }
   }
 
   @override
@@ -48,8 +73,14 @@ class SopDialog extends StatelessWidget {
       ),
       actions: [
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(),
-          child: const Text('我已了解'),
+          onPressed: () => Navigator.of(context).pop(SopDecision.confirmedDanger),
+          style: FilledButton.styleFrom(backgroundColor: Colors.red),
+          child: const Text('複檢異常'),
+        ),
+        OutlinedButton(
+          onPressed: () =>
+              Navigator.of(context).pop(SopDecision.uncertainWarning),
+          child: const Text('複檢正常（疑似誤判）'),
         ),
       ],
     );

@@ -31,12 +31,14 @@ class ThermalScanViewState extends State<ThermalScanView> {
   Timer? _streamTimer;
   StreamSubscription<ScanData>? _bleSubscription;
   StreamSubscription<ScanData>? _esp32Subscription;
-  String? _alertScanId;
   String _connectionStatus = '尚未連接硬體，按「開始即時掃描」可使用模擬資料';
   bool _usingHardware = false;
   bool _usingEsp32 = false;
   bool _isConnecting = false;
-  final Set<String> _persistedRiskScanIds = {};
+  bool _isSopActive = false;
+  bool _riskEpisodeHandled = false;
+  DateTime? _lastSopClosedTime;
+  static const _sopCooldown = Duration(seconds: 20);
 
   @override
   void initState() {
@@ -162,24 +164,48 @@ class ThermalScanViewState extends State<ThermalScanView> {
       );
     });
 
-    // 每筆掃描只提示一次，避免畫面重建時重複彈窗。
-    if (scan.analyze().isHighRisk && _alertScanId != scan.id) {
-      unawaited(_persistHighRiskScan(scan));
-      _pauseStream();
-      _alertScanId = scan.id;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) SopDialog.show(context);
-      });
+    final isHighRisk = scan.analyze().isHighRisk;
+    if (!isHighRisk) {
+      _riskEpisodeHandled = false;
+    }
+    if (isHighRisk && !_riskEpisodeHandled) {
+      _riskEpisodeHandled = true;
+      _showSopForScan(scan);
     }
   }
 
-  Future<void> _persistHighRiskScan(ScanData scan) async {
-    if (_persistedRiskScanIds.contains(scan.id)) return;
+  void _showSopForScan(ScanData scan) {
+    if (_isSopActive) return;
+    final lastClosed = _lastSopClosedTime;
+    if (lastClosed != null &&
+        DateTime.now().difference(lastClosed) < _sopCooldown) {
+      return;
+    }
 
+    _isSopActive = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      try {
+        final decision = await SopDialog.show(context);
+        if (decision != null) {
+          await _persistSopDecision(scan, decision);
+        }
+      } finally {
+        _isSopActive = false;
+        _lastSopClosedTime = DateTime.now();
+      }
+    });
+  }
+
+  Future<void> _persistSopDecision(
+    ScanData scan,
+    SopDecision decision,
+  ) async {
     final position = await _getCurrentPosition();
-    if (position == null) return;
+    if (position == null || !mounted) return;
 
     final result = scan.analyze();
+    final isDanger = decision == SopDecision.confirmedDanger;
     await DatabaseHelper.instance.insertRecord(
       DetectionRecord(
         timestamp: DateTime.now().toUtc(),
@@ -187,12 +213,13 @@ class ThermalScanViewState extends State<ThermalScanView> {
         maxRSSI: result.rssi,
         latitude: position.latitude,
         longitude: position.longitude,
-        statusColor: 'RED',
-        userDecision: 'CONFIRMED_DANGER',
-        adviceText: '請立即檢查該位置並依現場安全程序處置。',
+        statusColor: isDanger ? 'RED' : 'YELLOW',
+        userDecision: isDanger ? 'CONFIRMED_DANGER' : 'UNCERTAIN_WARNING',
+        adviceText: isDanger
+            ? '複檢異常：請立即檢查該位置並依現場安全程序處置。'
+            : '複檢正常（疑似誤判）：建議貼膠帶遮蔽可疑位置或拔除電源後再驗證。',
       ),
     );
-    _persistedRiskScanIds.add(scan.id);
   }
 
   Future<Position?> _getCurrentPosition() async {
