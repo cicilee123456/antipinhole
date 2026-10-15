@@ -317,3 +317,340 @@ flutter build windows：成功
 ```
 
 Web 專案建置成功，但透過 Chrome 啟動時工具曾逾時；使用 Web Server 模式啟動後，尚未確認瀏覽器頁面實際顯示。後續需確認 `flutter run -d web-server --web-port 8080` 完成啟動，並於 `http://localhost:8080` 驗證畫面。
+
+---
+
+# 2026-10-14 工作日誌｜SOP 高風險彈窗防重複與冷卻機制
+
+## 今日工作摘要
+
+修正 AntiPinhole App 在 CC1101、BLE 與熱成像感測器持續傳送高風險資料時，反覆呼叫 `showDialog` 所造成的彈窗無限堆疊、畫面卡死與記憶體耗用問題。
+
+本次改為：
+
+```text
+高頻感測器資料
+        ↓
+更新畫面 / 熱圖 / 樣本列表
+        ↓
+高風險事件邊沿判定
+        ↓
+全域 Dialog 鎖 + 20 秒冷卻
+        ↓
+只顯示一個 SOP
+        ↓
+使用者選擇紅色或黃色處置
+        ↓
+寫入 SQLite DetectionRecord
+```
+
+---
+
+## 一、原始問題與根因
+
+### 問題現象
+
+- 感測器約每幾百毫秒持續回傳資料。
+- RSSI 或熱成像結果持續高於風險門檻。
+- 每筆感測資料可能都有不同的 ID。
+- 背景資料持續進入時，系統不斷呼叫 `showDialog`。
+- 多個 Dialog 疊在 Navigator 上，最後造成畫面卡死或 App 崩潰。
+
+### 根本原因
+
+原本只使用單頁面的布林旗標或掃描 ID 判斷：
+
+```dart
+if (scan.analyze().isHighRisk && _alertScanId != scan.id) {
+  showDialog(...);
+}
+```
+
+但硬體資料每次可能產生新的 ID，因此即使仍是同一個持續高風險事件，也會被當成新的事件再次觸發。
+
+另外，熱成像頁與 CC1101 診斷頁各自擁有自己的旗標，無法防止兩個頁面同時呼叫 Dialog。
+
+---
+
+## 二、SOP Dialog 全域防護
+
+檔案：`lib/views/thermal/sop_dialog.dart`
+
+新增全域顯示鎖與冷卻時間：
+
+```dart
+static bool _isShowing = false;
+static DateTime? _lastClosedTime;
+static const _cooldown = Duration(seconds: 20);
+```
+
+所有 SOP 顯示都必須通過同一個入口：
+
+```dart
+static Future<SopDecision?> show(BuildContext context) async {
+  if (_isShowing) return null;
+
+  final lastClosedTime = _lastClosedTime;
+  if (lastClosedTime != null &&
+      DateTime.now().difference(lastClosedTime) < _cooldown) {
+    return null;
+  }
+
+  _isShowing = true;
+  try {
+    return await showDialog<SopDecision>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const PopScope(
+        canPop: false,
+        child: SopDialog(),
+      ),
+    );
+  } finally {
+    _isShowing = false;
+    _lastClosedTime = DateTime.now();
+  }
+}
+```
+
+### 防護效果
+
+| 防護條件 | 行為 |
+|---|---|
+| 已有 SOP 開啟 | 直接忽略新的觸發 |
+| Dialog 剛關閉未滿 20 秒 | 不再次顯示 |
+| 使用者按返回鍵 | 不允許繞過 SOP 狀態管理 |
+| Dialog 發生例外 | `finally` 仍會釋放鎖並記錄關閉時間 |
+
+---
+
+## 三、二態處置流程
+
+新增 SOP 結果：
+
+```dart
+enum SopDecision {
+  confirmedDanger,
+  uncertainWarning,
+}
+```
+
+Dialog 提供兩個處置按鈕：
+
+```dart
+FilledButton(
+  onPressed: () =>
+      Navigator.of(context).pop(SopDecision.confirmedDanger),
+  child: const Text('複檢異常'),
+),
+OutlinedButton(
+  onPressed: () =>
+      Navigator.of(context).pop(SopDecision.uncertainWarning),
+  child: const Text('複檢正常（疑似誤判）'),
+),
+```
+
+### 對照計畫書圖 2-1
+
+| 使用者選擇 | SQLite 狀態 | 使用者決策 | 處置建議 |
+|---|---|---|---|
+| 複檢異常 | `RED` | `CONFIRMED_DANGER` | 立即檢查可疑位置並依安全程序處置 |
+| 複檢正常 | `YELLOW` | `UNCERTAIN_WARNING` | 貼膠帶遮蔽或拔除電源後重新驗證 |
+
+紀錄寫入核心邏輯：
+
+```dart
+final isDanger = decision == SopDecision.confirmedDanger;
+
+await DatabaseHelper.instance.insertRecord(
+  DetectionRecord(
+    timestamp: DateTime.now().toUtc(),
+    maxDeltaT: result.deltaT,
+    maxRSSI: result.rssi,
+    latitude: position.latitude,
+    longitude: position.longitude,
+    statusColor: isDanger ? 'RED' : 'YELLOW',
+    userDecision:
+        isDanger ? 'CONFIRMED_DANGER' : 'UNCERTAIN_WARNING',
+    adviceText: isDanger
+        ? '複檢異常：請立即檢查該位置並依現場安全程序處置。'
+        : '複檢正常（疑似誤判）：建議貼膠帶遮蔽可疑位置或拔除電源後再驗證。',
+  ),
+);
+```
+
+---
+
+## 四、高風險事件邊沿觸發
+
+檔案：
+
+```text
+lib/views/thermal/thermal_scan_view.dart
+lib/views/hardware/cc1101_diagnostic_view.dart
+```
+
+新增：
+
+```dart
+bool _isSopActive = false;
+bool _riskEpisodeHandled = false;
+DateTime? _lastSopClosedTime;
+static const _sopCooldown = Duration(seconds: 20);
+```
+
+### 熱成像資料流程
+
+```dart
+final isHighRisk = scan.analyze().isHighRisk;
+
+if (!isHighRisk) {
+  _riskEpisodeHandled = false;
+}
+
+if (isHighRisk && !_riskEpisodeHandled) {
+  _riskEpisodeHandled = true;
+  _showSopForScan(scan);
+}
+```
+
+### CC1101 RSSI 流程
+
+```dart
+final rssi = sample.rssi;
+
+if (rssi == null || rssi <= _riskRssiThreshold) {
+  _riskEpisodeHandled = false;
+  return;
+}
+
+if (_riskEpisodeHandled) return;
+if (_isSopActive) return;
+
+final lastClosed = _lastSopClosedTime;
+if (lastClosed != null &&
+    DateTime.now().difference(lastClosed) < _sopCooldown) {
+  return;
+}
+
+_riskEpisodeHandled = true;
+_isSopActive = true;
+```
+
+### 事件狀態機
+
+```text
+SAFE / 低於門檻
+        │
+        ├── 高於門檻
+        ▼
+UNHANDLED HIGH RISK
+        │
+        ├── 顯示 SOP 一次
+        ▼
+HANDLED HIGH RISK
+        │
+        ├── 後續高風險資料只更新畫面
+        │
+        └── 必須回到 SAFE 才重新允許觸發
+```
+
+這代表即使 20 秒冷卻期結束，只要風險沒有降回安全狀態，也不會再次彈出 SOP。
+
+---
+
+## 五、背景資料更新策略
+
+SOP 開啟期間不停止資料更新：
+
+- 熱成像熱力圖持續更新。
+- 最新風險文字持續更新。
+- CC1101 原始樣本持續保存。
+- 背景資料不會建立新的 Dialog。
+- 使用者完成 SOP 後才寫入處置結果。
+
+此方式避免使用者處理實體現場時，畫面資料停止更新，也避免用「暫停串流」掩蓋狀態管理問題。
+
+---
+
+## 六、異常與錯誤處理
+
+若定位服務或定位權限不可用：
+
+```dart
+if (!await Geolocator.isLocationServiceEnabled()) {
+  return false;
+}
+```
+
+App 不會顯示「已成功記錄」的錯誤訊息，而會明確提示：
+
+```text
+定位服務不可用，無法寫入事件紀錄
+```
+
+Dialog 的鎖定狀態使用 `finally` 釋放，確保即使資料庫寫入或定位流程發生例外，也不會永久卡住 SOP。
+
+---
+
+## 七、修改檔案
+
+| 檔案 | 修改內容 |
+|---|---|
+| `lib/views/thermal/sop_dialog.dart` | 全域 Dialog 鎖、20 秒冷卻、二態處置結果 |
+| `lib/views/thermal/thermal_scan_view.dart` | 熱成像高風險事件邊沿觸發、SQLite 處置紀錄 |
+| `lib/views/hardware/cc1101_diagnostic_view.dart` | CC1101 RSSI 事件鎖定、SQLite 處置紀錄與錯誤提示 |
+
+---
+
+## 八、驗證結果
+
+### 靜態分析
+
+```text
+flutter analyze \
+  lib/views/thermal/sop_dialog.dart \
+  lib/views/thermal/thermal_scan_view.dart \
+  lib/views/hardware/cc1101_diagnostic_view.dart
+
+No issues found!
+```
+
+### 聚焦測試
+
+```text
+flutter test \
+  test/database_factory_test.dart \
+  test/cc1101_diagnostic_sample_test.dart \
+  test/thermal_heatmap64_view_test.dart
+
+6 tests passed
+```
+
+### 已知既有問題
+
+全專案分析仍有一個原有測試錯誤：
+
+```text
+test/widget_test.dart 使用不存在的 MyApp
+目前實際 App 類別為 AntiPinholeApp
+```
+
+此問題與本次 SOP 防重複邏輯修改無關，尚未在本次日誌中一併變更。
+
+---
+
+## 九、今日結論
+
+本次已將 SOP 觸發從「每筆高風險資料都可能觸發」改為：
+
+```text
+單一全域 Dialog
++ Dialog 顯示鎖
++ 20 秒冷卻
++ 高風險事件邊沿觸發
++ 風險解除後才重新 armed
++ 二態處置結果寫入 SQLite
+```
+
+因此，持續高風險資料只會更新監控畫面，不會再無限堆疊彈窗。下一步建議使用實際 CC1101、BLE 與熱成像硬體進行長時間壓力測試，確認在高頻資料持續輸入下 Navigator 與記憶體使用量保持穩定。
