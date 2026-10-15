@@ -37,6 +37,7 @@ class Cc1101DiagnosticService {
   web_ble.BluetoothCharacteristic? _webCharacteristic;
   Timer? _timer;
   bool _requestInFlight = false;
+  String _bleJsonBuffer = '';
 
   Stream<Cc1101DiagnosticSample> get samples => _controller.stream;
 
@@ -168,15 +169,48 @@ class Cc1101DiagnosticService {
   }
 
   void _handleBluetoothValue(List<int> value) {
-    final text = utf8.decode(value, allowMalformed: false).trim();
-    if (text.isEmpty) return;
     try {
-      final decoded = jsonDecode(text);
-      if (decoded is! Map<String, dynamic>) {
-        throw const FormatException('CC1101 BLE 回應必須是 JSON 物件');
+      _bleJsonBuffer += utf8.decode(value, allowMalformed: false);
+      if (_bleJsonBuffer.length > 4096) {
+        _bleJsonBuffer = '';
+        throw const FormatException('CC1101 BLE JSON 封包超過 4096 字元');
       }
-      _controller.add(Cc1101DiagnosticSample.fromJson(decoded));
+
+      while (true) {
+        final start = _bleJsonBuffer.indexOf('{');
+        if (start < 0) {
+          _bleJsonBuffer = '';
+          return;
+        }
+        if (start > 0) {
+          _bleJsonBuffer = _bleJsonBuffer.substring(start);
+        }
+
+        var depth = 0;
+        var end = -1;
+        for (var index = 0; index < _bleJsonBuffer.length; index++) {
+          final character = _bleJsonBuffer.codeUnitAt(index);
+          if (character == 123) depth++;
+          if (character == 125) {
+            depth--;
+            if (depth == 0) {
+              end = index + 1;
+              break;
+            }
+          }
+        }
+        if (end < 0) return;
+
+        final jsonText = _bleJsonBuffer.substring(0, end);
+        _bleJsonBuffer = _bleJsonBuffer.substring(end);
+        final decoded = jsonDecode(jsonText);
+        if (decoded is! Map<String, dynamic>) {
+          throw const FormatException('CC1101 BLE 回應必須是 JSON 物件');
+        }
+        _controller.add(Cc1101DiagnosticSample.fromJson(decoded));
+      }
     } catch (error, stackTrace) {
+      _bleJsonBuffer = '';
       _controller.addError(error, stackTrace);
     }
   }
@@ -218,6 +252,7 @@ class Cc1101DiagnosticService {
     _bluetoothDevice = null;
     _webCharacteristic = null;
     _webDevice = null;
+    _bleJsonBuffer = '';
   }
 
   Future<void> dispose() async {

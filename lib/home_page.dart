@@ -76,7 +76,7 @@ class _HomePageState extends State<HomePage> {
             padding: EdgeInsets.zero,
             children: [
               Padding(
-                padding: const EdgeInsets.fromLTRB(20, 24, 16, 16),
+                padding: const EdgeInsets.fromLTRB(20, 14, 16, 16),
                 child: Text(
                   'Anti-Pinhole Detector',
                   style: Theme.of(context).textTheme.titleLarge,
@@ -101,65 +101,57 @@ class _HomePageState extends State<HomePage> {
       ),
       body: IndexedStack(index: _selectedIndex, children: _pages),
       bottomNavigationBar: _selectedIndex < 3
-    ? SafeArea(
-        top: false,
-        // 1. 調整左右邊距控制「寬度」（左右各 50 讓它變短變小）
-        minimum: const EdgeInsets.fromLTRB(50, 0, 50, 10),
-        child: Material(
-          color: const Color(0xFFAEB8C4).withValues(alpha: 0.85),
-          elevation: 4,
-          shadowColor: Colors.black12,
-          shape: const StadiumBorder(),
-          clipBehavior: Clip.antiAlias,
-          // 2. 調整「高度」壓扁（改為 54）
-          child: SizedBox(
-            height: 40,
-            child: NavigationBarTheme(
-              data: NavigationBarThemeData(
-                // 縮小選中時的藥丸高亮大小
-                indicatorShape: const StadiumBorder(),
-                indicatorColor: Colors.white.withValues(alpha: 0.5),
-                // 縮小文字字級
-                labelTextStyle: WidgetStateProperty.all(
-                  const TextStyle(fontSize: 11, fontWeight: FontWeight.w500),
-                ),
-                // 縮小圖示大小
-                iconTheme: WidgetStateProperty.all(
-                  const IconThemeData(size: 20),
+          ? Container(
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.surface,
+                border: Border(
+                  top: BorderSide(color: Colors.grey.shade200),
                 ),
               ),
-              child: NavigationBar(
-                backgroundColor: Colors.transparent,
-                elevation: 0,
-                selectedIndex: _selectedIndex,
-                // 只在選中時顯示文字，或設為 alwaysShow / alwaysHide
-                labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-                onDestinationSelected: (index) {
-                  setState(() => _selectedIndex = index);
-                },
-                destinations: const [
-                  NavigationDestination(
-                    icon: Icon(Icons.thermostat_outlined),
-                    selectedIcon: Icon(Icons.thermostat),
-                    label: '熱成像',
+              child: SafeArea(
+                top: false,
+                child: NavigationBarTheme(
+                  data: NavigationBarThemeData(
+                    indicatorColor:
+                        Theme.of(context).colorScheme.secondaryContainer,
+                    labelTextStyle: WidgetStateProperty.all(
+                      const TextStyle(fontSize: 11),
+                    ),
+                    iconTheme: WidgetStateProperty.all(
+                      const IconThemeData(size: 20),
+                    ),
                   ),
-                  NavigationDestination(
-                    icon: Icon(Icons.monitor_heart_outlined),
-                    selectedIcon: Icon(Icons.monitor_heart),
-                    label: '硬體監控',
+                  child: NavigationBar(
+                    backgroundColor: Colors.transparent,
+                    elevation: 0,
+                    selectedIndex: _selectedIndex,
+                    labelBehavior:
+                        NavigationDestinationLabelBehavior.alwaysShow,
+                    onDestinationSelected: (index) {
+                      setState(() => _selectedIndex = index);
+                    },
+                    destinations: const [
+                      NavigationDestination(
+                        icon: Icon(Icons.thermostat_outlined),
+                        selectedIcon: Icon(Icons.thermostat),
+                        label: '熱成像',
+                      ),
+                      NavigationDestination(
+                        icon: Icon(Icons.monitor_heart_outlined),
+                        selectedIcon: Icon(Icons.monitor_heart),
+                        label: '硬體監控',
+                      ),
+                      NavigationDestination(
+                        icon: Icon(Icons.map_outlined),
+                        selectedIcon: Icon(Icons.map),
+                        label: '安全地圖',
+                      ),
+                    ],
                   ),
-                  NavigationDestination(
-                    icon: Icon(Icons.map_outlined),
-                    selectedIcon: Icon(Icons.map),
-                    label: '安全地圖',
-                  ),
-                ],
+                ),
               ),
-            ),
-          ),
-        ),
-      )
-    : null,
+            )
+          : null,
     );
   }
 }
