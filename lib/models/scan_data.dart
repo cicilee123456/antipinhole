@@ -176,10 +176,20 @@ class DetectionAnalyzer {
     final maximumTemperature = scan.thermalGrid.reduce(math.max);
     final deltaT = maximumTemperature - minimumTemperature;
 
-    // 暫時測試規則：只要 RSSI 高於 -89 dBm 就觸發高風險告警。
-    final level =
-        scan.rssi > -89.0 ? DetectionLevel.highRisk : DetectionLevel.safe;
-    final weightedScore = ((scan.rssi + 89.0) / 89.0).clamp(0.0, 1.0);
+    final highThermalDelta = deltaT >= 6.0;
+    final strongSignal = scan.rssi >= -50.0;
+    final warningThermalDelta = deltaT >= 4.0;
+    final warningSignal = scan.rssi >= -65.0;
+
+    final level = highThermalDelta && strongSignal
+        ? DetectionLevel.highRisk
+        : warningThermalDelta || warningSignal
+            ? DetectionLevel.warning
+            : DetectionLevel.safe;
+
+    final thermalScore = ((deltaT / 6.0) * 0.6).clamp(0.0, 0.6);
+    final signalScore = (((scan.rssi + 100.0) / 50.0) * 0.4).clamp(0.0, 0.4);
+    final weightedScore = thermalScore + signalScore;
 
     return ScanResult(
       level: level,
