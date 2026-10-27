@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import '../models/cc1101_diagnostic_sample.dart';
 import '../models/scan_data.dart';
 
 class HardwareDataEvent {
@@ -8,6 +9,7 @@ class HardwareDataEvent {
     required this.source,
     required this.rawText,
     this.scan,
+    this.cc1101Sample,
     this.error,
   });
 
@@ -15,9 +17,10 @@ class HardwareDataEvent {
   final String source;
   final String rawText;
   final ScanData? scan;
+  final Cc1101DiagnosticSample? cc1101Sample;
   final String? error;
 
-  bool get isParsed => scan != null && error == null;
+  bool get isParsed => (scan != null || cc1101Sample != null) && error == null;
 }
 
 class HardwareDataMonitor {
@@ -32,6 +35,7 @@ class HardwareDataMonitor {
     required String source,
     required String rawText,
     ScanData? scan,
+    Cc1101DiagnosticSample? cc1101Sample,
     String? error,
   }) {
     if (!_controller.isClosed) {
@@ -41,6 +45,7 @@ class HardwareDataMonitor {
           source: source,
           rawText: rawText,
           scan: scan,
+          cc1101Sample: cc1101Sample,
           error: error,
         ),
       );

@@ -69,9 +69,9 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 20));
 
-    expect(find.text('Min Temp'), findsOneWidget);
-    expect(find.text('Max Temp'), findsOneWidget);
-    expect(find.text('Avg Temp'), findsOneWidget);
+    expect(find.text('最低溫度'), findsOneWidget);
+    expect(find.text('最高溫度'), findsOneWidget);
+    expect(find.text('平均溫度'), findsOneWidget);
     expect(find.text('0.0 °C'), findsOneWidget);
     expect(find.text('63.0 °C'), findsOneWidget);
     expect(find.text('31.5 °C'), findsOneWidget);

@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
@@ -7,6 +8,7 @@ import '../../models/detection_record.dart';
 import '../../models/scan_data.dart';
 import '../../services/database_helper.dart';
 import '../../services/esp32_http_service.dart';
+import '../../services/hardware_data_monitor.dart';
 import '../../services/thermocam_ble_service.dart';
 import '../../services/thermal_simulator.dart';
 import '../../utils/thermal_interpolator.dart';
@@ -57,7 +59,9 @@ class ThermalScanViewState extends State<ThermalScanView> {
 
     try {
       await _bleService.connect();
-      _bleSubscription = _bleService.scans.listen(_updateScan);
+      _bleSubscription = _bleService.scans.listen(
+        (scan) => _updateScan(scan, recordEvent: false),
+      );
       if (mounted) {
         setState(() {
           _usingHardware = true;
@@ -87,7 +91,7 @@ class ThermalScanViewState extends State<ThermalScanView> {
 
     _usingEsp32 = true;
     _esp32Subscription = _esp32Service.scans.listen(
-      _updateScan,
+      (scan) => _updateScan(scan, recordEvent: false),
       onError: (Object error) {
         if (mounted) setState(() => _connectionStatus = 'ESP32 讀取失敗：$error');
       },
@@ -129,7 +133,10 @@ class ThermalScanViewState extends State<ThermalScanView> {
     setState(() => _isScanning = true);
     _streamTimer = Timer.periodic(
       const Duration(milliseconds: 300),
-      (_) => _updateScan(_simulator.scan()),
+      (_) => _updateScan(
+        _simulator.scan(),
+        source: '熱成像模擬資料',
+      ),
     );
   }
 
@@ -144,7 +151,11 @@ class ThermalScanViewState extends State<ThermalScanView> {
     if (mounted) setState(() => _isScanning = false);
   }
 
-  void _updateScan(ScanData scan) {
+  void _updateScan(
+    ScanData scan, {
+    String source = 'ThermoCam BLE',
+    bool recordEvent = true,
+  }) {
     final interpolatedGrid = ThermalInterpolator.interpolate8x8(
       scan.thermalGrid,
       targetSize: 64,
@@ -163,6 +174,21 @@ class ThermalScanViewState extends State<ThermalScanView> {
         growable: false,
       );
     });
+    if (recordEvent) {
+      HardwareDataMonitor.instance.add(
+        source: source,
+        rawText: jsonEncode({
+          'id': scan.id,
+          'device_name': scan.deviceName,
+          'rssi': scan.rssi,
+          'thermal_grid': scan.thermalGrid,
+          'captured_at': scan.capturedAt,
+          'ir_detected': scan.irDetected,
+          'wifi_device_count': scan.wifiDeviceCount,
+        }),
+        scan: scan,
+      );
+    }
 
     final isHighRisk = scan.analyze().isHighRisk;
     if (!isHighRisk) {

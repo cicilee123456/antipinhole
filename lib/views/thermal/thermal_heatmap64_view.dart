@@ -191,8 +191,8 @@ class _ThermalHeatmap64ViewState extends State<ThermalHeatmap64View> {
     }
     _minimumTemperature = minimum;
     _maximumTemperature = maximum;
-    _averageTemperature = total /
-        (ThermalHeatmap64View.gridSize * ThermalHeatmap64View.gridSize);
+    _averageTemperature =
+        total / (ThermalHeatmap64View.gridSize * ThermalHeatmap64View.gridSize);
   }
 
   void _renderImage(List<List<double>> temperatures) {
@@ -266,15 +266,15 @@ class _ThermalHeatmap64ViewState extends State<ThermalHeatmap64View> {
               runSpacing: 12,
               children: [
                 _TemperatureMetric(
-                  label: 'Min Temp',
+                  label: '最低溫度',
                   value: _minimumTemperature,
                 ),
                 _TemperatureMetric(
-                  label: 'Max Temp',
+                  label: '最高溫度',
                   value: _maximumTemperature,
                 ),
                 _TemperatureMetric(
-                  label: 'Avg Temp',
+                  label: '平均溫度',
                   value: _averageTemperature,
                 ),
               ],
