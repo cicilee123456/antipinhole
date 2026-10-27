@@ -31,8 +31,14 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
   bool _isRunning = false;
   bool _useBluetooth = false;
   bool _isSopActive = false;
+  bool _isSopMinimized = false;
+  Cc1101DiagnosticSample? _sopSample;
+  Timer? _snapshotFreezeTimer;
+  DateTime? _snapshotFreezeUntil;
+  Cc1101DiagnosticSample? _latestSampleDuringFreeze;
   bool _riskEpisodeHandled = false;
   DateTime? _lastSopClosedTime;
+  static const _snapshotFreezeDuration = Duration(seconds: 10);
   static const _sopCooldown = Duration(seconds: 20);
 
   @override
@@ -73,6 +79,10 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
   }
 
   Future<void> _stop() async {
+    _snapshotFreezeTimer?.cancel();
+    _snapshotFreezeTimer = null;
+    _snapshotFreezeUntil = null;
+    _latestSampleDuringFreeze = null;
     await _service.stop();
     await _subscription?.cancel();
     _subscription = null;
@@ -83,6 +93,14 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
 
   void _addSample(Cc1101DiagnosticSample sample) {
     if (!mounted) return;
+    if (_isSnapshotFrozen) {
+      _latestSampleDuringFreeze = sample;
+      return;
+    }
+    _appendSample(sample);
+  }
+
+  void _appendSample(Cc1101DiagnosticSample sample) {
     setState(() {
       _samples.add(sample);
       if (_samples.length > 200) _samples.removeAt(0);
@@ -108,47 +126,100 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
 
     _riskEpisodeHandled = true;
     _isSopActive = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _handleSop(sample, rssi);
-    });
+    _sopSample = sample;
+    _isSopMinimized = false;
+    _freezeSnapshot();
+    if (mounted) setState(() {});
   }
 
-  Future<void> _handleSop(
-    Cc1101DiagnosticSample sample,
-    double rssi,
-  ) async {
-    try {
-      final decision = await SopDialog.show(context);
-      if (decision != null) {
-        final persisted = await _persistSopDecision(sample, decision);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                persisted
-                    ? decision == SopDecision.confirmedDanger
-                        ? '複檢異常：已記錄紅色高風險事件'
-                        : '複檢正常：已記錄黃色待驗證事件'
-                    : '定位服務不可用，無法寫入事件紀錄',
-              ),
-              backgroundColor: persisted
-                  ? decision == SopDecision.confirmedDanger
-                      ? Colors.red
-                      : Colors.amber.shade800
-                  : Colors.orange,
-            ),
-          );
+  bool get _isSnapshotFrozen {
+    final until = _snapshotFreezeUntil;
+    return until != null && DateTime.now().isBefore(until);
+  }
+
+  int get _snapshotFreezeRemainingSeconds {
+    final until = _snapshotFreezeUntil;
+    if (until == null) return 0;
+    final remaining = until.difference(DateTime.now()).inMilliseconds;
+    if (remaining <= 0) return 0;
+    return (remaining / 1000).ceil();
+  }
+
+  void _freezeSnapshot() {
+    _snapshotFreezeTimer?.cancel();
+    _snapshotFreezeUntil = DateTime.now().add(_snapshotFreezeDuration);
+    _latestSampleDuringFreeze = null;
+    unawaited(_pauseHardwareDetection());
+    _snapshotFreezeTimer = Timer.periodic(
+      const Duration(seconds: 1),
+      (_) {
+        if (!mounted) return;
+        if (!_isSnapshotFrozen) {
+          _snapshotFreezeTimer?.cancel();
+          _snapshotFreezeTimer = null;
+          _snapshotFreezeUntil = null;
+          final latestSample = _latestSampleDuringFreeze;
+          _latestSampleDuringFreeze = null;
+          unawaited(_resumeHardwareDetection());
+          if (latestSample != null) {
+            _appendSample(latestSample);
+          } else {
+            setState(() {});
+          }
+          return;
         }
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('SOP 已關閉，未建立事件紀錄')),
-        );
+        setState(() {});
+      },
+    );
+  }
+
+  Future<void> _pauseHardwareDetection() async {
+    try {
+      await _service.pauseDetection();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = '暫停 CC1101 偵測失敗：$error');
       }
-    } finally {
-      _isSopActive = false;
-      _lastSopClosedTime = DateTime.now();
     }
+  }
+
+  Future<void> _resumeHardwareDetection() async {
+    try {
+      await _service.resumeDetection();
+    } catch (error) {
+      if (mounted) {
+        setState(() => _error = '恢復 CC1101 偵測失敗：$error');
+      }
+    }
+  }
+
+  Future<void> _completeSop(SopDecision decision) async {
+    final sample = _sopSample;
+    if (!_isSopActive || sample == null) return;
+
+    _isSopActive = false;
+    _sopSample = null;
+    _lastSopClosedTime = DateTime.now();
+    if (mounted) setState(() {});
+
+    final persisted = await _persistSopDecision(sample, decision);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          persisted
+              ? decision == SopDecision.confirmedDanger
+                  ? '複檢異常：已記錄紅色高風險事件'
+                  : '複檢正常：已記錄黃色待驗證事件'
+              : '定位服務不可用，無法寫入事件紀錄',
+        ),
+        backgroundColor: persisted
+            ? decision == SopDecision.confirmedDanger
+                ? Colors.red
+                : Colors.amber.shade800
+            : Colors.orange,
+      ),
+    );
   }
 
   Future<bool> _persistSopDecision(
@@ -234,6 +305,7 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
   @override
   void dispose() {
     _subscription?.cancel();
+    _snapshotFreezeTimer?.cancel();
     _service.dispose();
     _baseUrlController.dispose();
     super.dispose();
@@ -242,146 +314,179 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
   @override
   Widget build(BuildContext context) {
     final sample = _latest;
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Center(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 760),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('CC1101 診斷模式',
-                          style: Theme.of(context).textTheme.titleLarge),
-                      const SizedBox(height: 8),
-                      const Text(
-                          '此頁會自動收集無線訊號資料；RSSI 高於 -89 dBm 時會自動觸發高風險 SOP。'),
-                      const SizedBox(height: 16),
-                      SegmentedButton<bool>(
-                        segments: const [
-                          ButtonSegment<bool>(
-                            value: false,
-                            label: Text('Wi-Fi / HTTP'),
-                            icon: Icon(Icons.wifi),
-                          ),
-                          ButtonSegment<bool>(
-                            value: true,
-                            label: Text('Bluetooth BLE'),
-                            icon: Icon(Icons.bluetooth),
-                          ),
-                        ],
-                        selected: {_useBluetooth},
-                        onSelectionChanged: _isRunning
-                            ? null
-                            : (selection) {
-                                setState(() => _useBluetooth = selection.first);
-                              },
-                      ),
-                      const SizedBox(height: 8),
-                      if (!_useBluetooth)
-                        TextField(
-                          controller: _baseUrlController,
-                          enabled: !_isRunning,
-                          keyboardType: TextInputType.url,
-                          decoration: const InputDecoration(
-                            labelText: 'ESP32 Wi-Fi 位址',
-                            hintText: '例如 http://192.168.4.1',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      if (!_useBluetooth) const SizedBox(height: 8),
-                      Text(
-                        _useBluetooth
-                            ? '將搜尋 $_bluetoothDeviceName 並接收 BLE JSON 通知'
-                            : '每 500 ms 讀取 ${_baseUrlController.text.trim()}/data',
-                      ),
-                      const SizedBox(height: 16),
-                      Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
+    return Stack(
+      children: [
+        SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(20, 20, 20, 180),
+          child: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 760),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          FilledButton.icon(
-                            onPressed: _isRunning ? null : _start,
-                            icon: const Icon(Icons.play_arrow),
-                            label: const Text('開始測試'),
+                          Text('CC1101 診斷模式',
+                              style: Theme.of(context).textTheme.titleLarge),
+                          const SizedBox(height: 8),
+                          const Text(
+                              '此頁會自動收集無線訊號資料；RSSI 高於 -89 dBm 時會自動觸發高風險 SOP。'),
+                          const SizedBox(height: 16),
+                          SegmentedButton<bool>(
+                            segments: const [
+                              ButtonSegment<bool>(
+                                value: false,
+                                label: Text('Wi-Fi / HTTP'),
+                                icon: Icon(Icons.wifi),
+                              ),
+                              ButtonSegment<bool>(
+                                value: true,
+                                label: Text('Bluetooth BLE'),
+                                icon: Icon(Icons.bluetooth),
+                              ),
+                            ],
+                            selected: {_useBluetooth},
+                            onSelectionChanged: _isRunning
+                                ? null
+                                : (selection) {
+                                    setState(
+                                        () => _useBluetooth = selection.first);
+                                  },
                           ),
-                          OutlinedButton.icon(
-                            onPressed: _isRunning ? _stop : null,
-                            icon: const Icon(Icons.stop),
-                            label: const Text('停止測試'),
+                          const SizedBox(height: 8),
+                          if (!_useBluetooth)
+                            TextField(
+                              controller: _baseUrlController,
+                              enabled: !_isRunning,
+                              keyboardType: TextInputType.url,
+                              decoration: const InputDecoration(
+                                labelText: 'ESP32 Wi-Fi 位址',
+                                hintText: '例如 http://192.168.4.1',
+                                border: OutlineInputBorder(),
+                              ),
+                            ),
+                          if (!_useBluetooth) const SizedBox(height: 8),
+                          Text(
+                            _useBluetooth
+                                ? '將搜尋 $_bluetoothDeviceName 並接收 BLE JSON 通知'
+                                : '每 500 ms 讀取 ${_baseUrlController.text.trim()}/data',
                           ),
-                          OutlinedButton.icon(
-                            onPressed: _samples.isEmpty ? null : _copySamples,
-                            icon: const Icon(Icons.copy),
-                            label: const Text('複製 JSON'),
+                          const SizedBox(height: 16),
+                          Wrap(
+                            spacing: 8,
+                            runSpacing: 8,
+                            children: [
+                              FilledButton.icon(
+                                onPressed: _isRunning ? null : _start,
+                                icon: const Icon(Icons.play_arrow),
+                                label: const Text('開始測試'),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed: _isRunning ? _stop : null,
+                                icon: const Icon(Icons.stop),
+                                label: const Text('停止測試'),
+                              ),
+                              OutlinedButton.icon(
+                                onPressed:
+                                    _samples.isEmpty ? null : _copySamples,
+                                icon: const Icon(Icons.copy),
+                                label: const Text('複製 JSON'),
+                              ),
+                              TextButton.icon(
+                                onPressed:
+                                    _samples.isEmpty ? null : _clearSamples,
+                                icon: const Icon(Icons.delete_outline),
+                                label: const Text('清除紀錄'),
+                              ),
+                            ],
                           ),
-                          TextButton.icon(
-                            onPressed: _samples.isEmpty ? null : _clearSamples,
-                            icon: const Icon(Icons.delete_outline),
-                            label: const Text('清除紀錄'),
+                          const SizedBox(height: 12),
+                          Text(_isRunning ? '測試中，每 500 ms 讀取一次' : '測試尚未開始'),
+                          if (_error != null) ...[
+                            const SizedBox(height: 8),
+                            Text(_error!,
+                                style: TextStyle(
+                                    color:
+                                        Theme.of(context).colorScheme.error)),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  _MetricsCard(sample: sample),
+                  const SizedBox(height: 16),
+                  Card(
+                    child: Padding(
+                      padding: const EdgeInsets.all(20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text('原始紀錄',
+                              style: Theme.of(context).textTheme.titleMedium),
+                          const SizedBox(height: 8),
+                          Text('目前保留 ${_samples.length} / 200 筆，最新資料會自動加入。'),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            height: 180,
+                            child: _samples.isEmpty
+                                ? const Center(child: Text('尚未收到 CC1101 資料'))
+                                : ListView.builder(
+                                    itemCount: _samples.length,
+                                    itemBuilder: (context, index) {
+                                      final item =
+                                          _samples[_samples.length - index - 1];
+                                      return ListTile(
+                                        dense: true,
+                                        title: Text(
+                                          '${_format(item.capturedAt)}  RSSI ${_formatNumber(item.rssi, ' dBm')}',
+                                        ),
+                                        subtitle: Text(
+                                          'LQI ${_formatNumber(item.lqi, '')} | CRC ${_formatCrc(item.crcOk)} | PER ${_formatPercent(item.per)}',
+                                        ),
+                                      );
+                                    },
+                                  ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 12),
-                      Text(_isRunning ? '測試中，每 500 ms 讀取一次' : '測試尚未開始'),
-                      if (_error != null) ...[
-                        const SizedBox(height: 8),
-                        Text(_error!,
-                            style: TextStyle(
-                                color: Theme.of(context).colorScheme.error)),
-                      ],
-                    ],
+                    ),
                   ),
-                ),
+                ],
               ),
-              const SizedBox(height: 16),
-              _MetricsCard(sample: sample),
-              const SizedBox(height: 16),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(20),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text('原始紀錄',
-                          style: Theme.of(context).textTheme.titleMedium),
-                      const SizedBox(height: 8),
-                      Text('目前保留 ${_samples.length} / 200 筆，最新資料會自動加入。'),
-                      const SizedBox(height: 12),
-                      SizedBox(
-                        height: 180,
-                        child: _samples.isEmpty
-                            ? const Center(child: Text('尚未收到 CC1101 資料'))
-                            : ListView.builder(
-                                itemCount: _samples.length,
-                                itemBuilder: (context, index) {
-                                  final item =
-                                      _samples[_samples.length - index - 1];
-                                  return ListTile(
-                                    dense: true,
-                                    title: Text(
-                                      '${_format(item.capturedAt)}  RSSI ${_formatNumber(item.rssi, ' dBm')}',
-                                    ),
-                                    subtitle: Text(
-                                      'LQI ${_formatNumber(item.lqi, '')} | CRC ${_formatCrc(item.crcOk)} | PER ${_formatPercent(item.per)}',
-                                    ),
-                                  );
-                                },
-                              ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ),
-      ),
+        if (_isSopActive && _sopSample != null)
+          Positioned(
+            left: 20,
+            right: 20,
+            bottom: 20,
+            child: SafeArea(
+              child: Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 760),
+                  child: SopCard(
+                    deltaT: null,
+                    rssi: _sopSample!.rssi ?? 0,
+                    description: 'CC1101 偵測到高風險訊號，請完成現場光學複檢。',
+                    snapshotFrozen: _isSnapshotFrozen,
+                    freezeRemainingSeconds: _snapshotFreezeRemainingSeconds,
+                    minimized: _isSopMinimized,
+                    onToggleMinimized: () {
+                      setState(() => _isSopMinimized = !_isSopMinimized);
+                    },
+                    onDecision: _completeSop,
+                  ),
+                ),
+              ),
+            ),
+          ),
+      ],
     );
   }
 

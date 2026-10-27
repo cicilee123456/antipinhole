@@ -38,6 +38,7 @@ class Cc1101DiagnosticService {
   Timer? _timer;
   bool _requestInFlight = false;
   String _bleJsonBuffer = '';
+  bool _bluetoothMode = false;
 
   Stream<Cc1101DiagnosticSample> get samples => _controller.stream;
 
@@ -55,12 +56,49 @@ class Cc1101DiagnosticService {
 
   Future<void> start({bool bluetooth = false}) async {
     if (_timer != null) return;
+    _bluetoothMode = bluetooth;
     if (bluetooth) {
       await _startBluetooth();
       return;
     }
     await _pollOnce(rethrowError: true);
     _timer = Timer.periodic(
+      const Duration(milliseconds: 500),
+      (_) => unawaited(_pollOnce()),
+    );
+  }
+
+  Future<void> pauseDetection() async {
+    if (_bluetoothMode) {
+      await _valueSubscription?.cancel();
+      _valueSubscription = null;
+      await _webValueSubscription?.cancel();
+      _webValueSubscription = null;
+      await _bluetoothCharacteristic?.setNotifyValue(false);
+      await _webCharacteristic?.stopNotifications();
+      return;
+    }
+    _timer?.cancel();
+    _timer = null;
+  }
+
+  Future<void> resumeDetection() async {
+    if (_bluetoothMode) {
+      if (_bluetoothCharacteristic != null) {
+        await _bluetoothCharacteristic!.setNotifyValue(true);
+        _valueSubscription = _bluetoothCharacteristic!.onValueReceived
+            .listen(_handleBluetoothValue);
+      } else if (_webCharacteristic != null) {
+        await _webCharacteristic!.startNotifications();
+        _webValueSubscription = _webCharacteristic!.value.listen((value) {
+          _handleBluetoothValue(
+            value.buffer.asUint8List(value.offsetInBytes, value.lengthInBytes),
+          );
+        });
+      }
+      return;
+    }
+    _timer ??= Timer.periodic(
       const Duration(milliseconds: 500),
       (_) => unawaited(_pollOnce()),
     );
@@ -253,6 +291,7 @@ class Cc1101DiagnosticService {
     _webCharacteristic = null;
     _webDevice = null;
     _bleJsonBuffer = '';
+    _bluetoothMode = false;
   }
 
   Future<void> dispose() async {

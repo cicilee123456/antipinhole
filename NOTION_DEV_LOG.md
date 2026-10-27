@@ -1,7 +1,7 @@
 # AntiPinhole Detector｜今日開發日誌
 
 > 日期：2026-09-23  
-> 專案：AntiPinhole Detector 反針孔與熱成像偵測 App  
+> 專案：AntiPinhole Detector 反針孔與熱成像偵測 App
 > 平台：Flutter Web / Android / iOS  
 > 今日主題：ESP32 BLE 串接、Safety Map、SQLite 與 Web 啟動修復
 
@@ -654,3 +654,284 @@ test/widget_test.dart 使用不存在的 MyApp
 ```
 
 因此，持續高風險資料只會更新監控畫面，不會再無限堆疊彈窗。下一步建議使用實際 CC1101、BLE 與熱成像硬體進行長時間壓力測試，確認在高頻資料持續輸入下 Navigator 與記憶體使用量保持穩定。
+
+---
+
+# 2026-10-21 工作日誌｜SOP 非阻塞卡片、異常快照凍結與 CC1101 偵測暫停
+
+> 專案：AntiPinhole Detector 反針孔與熱成像偵測 App  
+> 今日主題：讓使用者可以在 SOP 出現時辨識異常位置，並避免全畫面彈窗與持續資料更新造成干擾
+
+---
+
+## 一、需求背景
+
+使用者在熱成像或 CC1101 偵測到異常後，需要先辨識異常位置，再進行現場光學複檢。
+
+原本的問題有兩個：
+
+1. SOP 使用全畫面 Modal Dialog，會遮住熱力圖與硬體資料。
+2. SOP 出現後硬體資料仍持續更新，熱點、RSSI 與原始紀錄會一直變動，使用者不容易確認是哪一次資料造成異常。
+
+本次調整目標：
+
+```text
+異常觸發
+    ↓
+保存觸發當下快照
+    ↓
+暫停偵測／畫面更新 10 秒
+    ↓
+顯示底部非阻塞式 SOP 卡片
+    ↓
+使用者辨識異常位置並進行光學複檢
+    ↓
+10 秒後恢復即時偵測
+    ↓
+使用者完成分案後啟動 20 秒新異常提示冷卻
+```
+
+---
+
+## 二、SOP UI 改為非阻塞式底部卡片
+
+### 原本行為
+
+熱成像與 CC1101 都透過 `SopDialog.show()` 顯示全畫面 Dialog：
+
+```text
+showDialog
+    ↓
+Modal barrier 覆蓋整個頁面
+    ↓
+使用者無法同時查看與操作背景資料
+```
+
+### 修改後行為
+
+兩個頁面統一使用共用的 `SopCard`：
+
+```text
+Stack
+├── 即時偵測頁面
+└── Positioned(bottom: 20)
+    └── SopCard
+```
+
+SOP 卡片功能：
+
+- 顯示在頁面底部，不遮住整個熱力圖或監控畫面。
+- 顯示觸發當下的 RSSI 與熱成像 ΔT。
+- 支援展開與收合。
+- 收合後保留「高風險 SOP 進行中」提示列。
+- 使用者選擇「複檢異常」或「複檢正常」後才完成本次 SOP。
+- 收合不等於完成，也不會啟動 20 秒冷卻。
+
+共用元件位置：
+
+```text
+lib/views/thermal/sop_dialog.dart
+```
+
+雖然檔名仍保留 `sop_dialog.dart`，但 `SopCard` 已作為熱成像與 CC1101 共用的非阻塞 UI 元件。
+
+---
+
+## 三、異常觸發快照凍結 10 秒
+
+### 熱成像頁
+
+熱成像頁在高風險觸發時：
+
+- 保存當下的 `ScanData` 與 64×64 熱力圖。
+- 畫面保持觸發當下的熱力圖、ΔT 與 RSSI。
+- 後續收到的資料暫存在 `_latestScanDuringFreeze`。
+- SOP 卡片顯示剩餘凍結秒數。
+- 10 秒結束後使用最新資料恢復即時畫面。
+- 不清除熱力圖，也不斷開 ThermoCam 或 ESP32 連線。
+
+相關狀態：
+
+```dart
+Timer? _snapshotFreezeTimer;
+DateTime? _snapshotFreezeUntil;
+ScanData? _latestScanDuringFreeze;
+```
+
+### CC1101 頁
+
+CC1101 頁也加入相同的 10 秒快照凍結流程：
+
+- 保存觸發當下的 `Cc1101DiagnosticSample`。
+- 凍結期間不更新 RSSI、指標與原始紀錄列表。
+- 後續收到的封包暫存在 `_latestSampleDuringFreeze`。
+- 倒數結束後加入最新封包並恢復更新。
+
+---
+
+## 四、CC1101 真正暫停硬體偵測
+
+初版 CC1101 只暫停畫面更新，但 service 仍然持續收資料，因此 SOP 出現時硬體仍在偵測。
+
+本次改為在 service 層提供真正的暫停／恢復 API：
+
+```dart
+Future<void> pauseDetection()
+Future<void> resumeDetection()
+```
+
+### Wi-Fi / HTTP 模式
+
+```text
+pauseDetection()
+    ↓
+停止 500 ms HTTP polling Timer
+
+resumeDetection()
+    ↓
+重新建立 polling Timer
+```
+
+### Bluetooth BLE 模式
+
+```text
+pauseDetection()
+    ↓
+取消 BLE value subscription
+停止 notification
+保留 BLE 連線
+
+resumeDetection()
+    ↓
+重新開啟 notification
+重新建立 value subscription
+```
+
+這樣可以讓硬體停止產生新的偵測資料，但不需要在 10 秒後重新掃描、配對或建立連線。
+
+相關檔案：
+
+```text
+lib/services/cc1101_diagnostic_service.dart
+lib/views/hardware/cc1101_diagnostic_view.dart
+```
+
+---
+
+## 五、20 秒分案後冷卻機制
+
+10 秒快照凍結與 20 秒冷卻是兩個不同用途：
+
+| 時間 | 觸發時間點 | 目的 |
+|---|---|---|
+| 10 秒快照凍結 | 偵測到異常時 | 讓使用者辨識異常位置 |
+| 20 秒新 SOP 冷卻 | 使用者完成分案時 | 避免下一個異常立即打斷使用者 |
+
+完整行為：
+
+```text
+高風險觸發
+    ↓
+凍結快照 10 秒
+    ↓
+恢復硬體偵測
+    ↓
+使用者可繼續查看即時資料與完成 SOP
+    ↓
+按下複檢結果
+    ↓
+開始 20 秒新 SOP 冷卻
+```
+
+以下情況不會啟動 20 秒冷卻：
+
+- SOP 卡片收合。
+- SOP 卡片展開。
+- 10 秒快照倒數結束。
+- 使用者尚未選擇複檢結果。
+
+---
+
+## 六、風險事件防重複
+
+兩個頁面都保留高風險事件邊沿觸發：
+
+```text
+安全
+  ↓
+第一次高風險：顯示 SOP
+  ↓
+高風險持續中：不重複觸發
+  ↓
+恢復安全：重新 armed
+  ↓
+再次高風險：允許新 SOP
+```
+
+因此：
+
+- 10 秒凍結不會建立多個 SOP。
+- SOP 顯示期間不會重複開啟新的卡片。
+- 使用者分案後 20 秒內不會再次顯示新的 SOP。
+- 同一段持續高風險不會每 20 秒重複提示。
+
+---
+
+## 七、驗證結果
+
+### Dart 靜態分析
+
+```bash
+flutter analyze \
+  lib/services/cc1101_diagnostic_service.dart \
+  lib/views/hardware/cc1101_diagnostic_view.dart
+```
+
+結果：
+
+```text
+No issues found!
+```
+
+### 相關測試
+
+```bash
+flutter test \
+  test/cc1101_diagnostic_sample_test.dart \
+  test/thermal_heatmap64_view_test.dart
+```
+
+結果：
+
+```text
+5 tests passed
+```
+
+---
+
+## 八、修改檔案摘要
+
+| 檔案 | 修改內容 |
+|---|---|
+| `lib/views/thermal/sop_dialog.dart` | 新增共用非阻塞 `SopCard`，支援收合、快照提示與複檢結果 |
+| `lib/views/thermal/thermal_scan_view.dart` | 熱成像異常快照凍結 10 秒，恢復後套用最新資料 |
+| `lib/views/hardware/cc1101_diagnostic_view.dart` | CC1101 SOP 卡片、10 秒快照凍結與分案後冷卻 |
+| `lib/services/cc1101_diagnostic_service.dart` | 新增 CC1101 偵測暫停／恢復，支援 HTTP 與 BLE |
+
+---
+
+## 九、今日結論
+
+本次完成後，熱成像與 CC1101 的 SOP 行為統一為：
+
+```text
+非阻塞底部 SOP 卡片
++ 觸發當下異常快照
++ 10 秒偵測暫停／畫面凍結
++ 10 秒後自動恢復
++ 使用者完成分案後 20 秒冷卻
++ 高風險事件邊沿觸發
++ 風險解除後重新 armed
+```
+
+使用者可以先看清楚異常位置，再進行現場光學複檢；同時也能避免全畫面彈窗遮擋資料，以及高頻硬體資料造成畫面持續跳動。
