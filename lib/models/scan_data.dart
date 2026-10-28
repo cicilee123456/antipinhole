@@ -14,6 +14,25 @@ enum DetectionLevel {
   final String label;
 }
 
+enum HeatEnvironmentMode {
+  heatSource('有熱源'),
+  noHeatSource('無熱源');
+
+  const HeatEnvironmentMode(this.label);
+
+  final String label;
+}
+
+class DetectionProfile {
+  const DetectionProfile({
+    this.environmentMode = HeatEnvironmentMode.heatSource,
+    this.thermalEnabled = true,
+  });
+
+  final HeatEnvironmentMode environmentMode;
+  final bool thermalEnabled;
+}
+
 class ScanData {
   const ScanData({
     required this.id,
@@ -145,7 +164,10 @@ class ScanData {
   final bool irDetected;
   final int wifiDeviceCount;
 
-  ScanResult analyze() => DetectionAnalyzer.evaluate(this);
+  ScanResult analyze([
+    DetectionProfile profile = const DetectionProfile(),
+  ]) =>
+      DetectionAnalyzer.evaluate(this, profile: profile);
 }
 
 class ScanResult {
@@ -156,6 +178,7 @@ class ScanResult {
     required this.maximumTemperature,
     required this.rssi,
     required this.weightedScore,
+    required this.profile,
   });
 
   final DetectionLevel level;
@@ -164,6 +187,7 @@ class ScanResult {
   final double maximumTemperature;
   final double rssi;
   final double weightedScore;
+  final DetectionProfile profile;
 
   bool get isHighRisk => level == DetectionLevel.highRisk;
 }
@@ -171,7 +195,10 @@ class ScanResult {
 class DetectionAnalyzer {
   const DetectionAnalyzer._();
 
-  static ScanResult evaluate(ScanData scan) {
+  static ScanResult evaluate(
+    ScanData scan, {
+    DetectionProfile profile = const DetectionProfile(),
+  }) {
     final minimumTemperature = scan.thermalGrid.reduce(math.min);
     final maximumTemperature = scan.thermalGrid.reduce(math.max);
     final deltaT = maximumTemperature - minimumTemperature;
@@ -188,6 +215,7 @@ class DetectionAnalyzer {
       maximumTemperature: maximumTemperature,
       rssi: scan.rssi,
       weightedScore: weightedScore,
+      profile: profile,
     );
   }
 }

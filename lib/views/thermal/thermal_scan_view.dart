@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart';
 import '../../models/detection_record.dart';
 import '../../models/scan_data.dart';
 import '../../services/database_helper.dart';
+import '../../services/detection_settings.dart';
 import '../../services/esp32_http_service.dart';
 import '../../services/thermocam_ble_service.dart';
 import '../../services/thermal_simulator.dart';
@@ -48,10 +49,30 @@ class ThermalScanViewState extends State<ThermalScanView> {
   DateTime? _lastSopClosedTime;
   static const _snapshotFreezeDuration = Duration(seconds: 10);
   static const _sopCooldown = Duration(seconds: 20);
+  final _detectionSettings = DetectionSettings.instance;
+
+  HeatEnvironmentMode get _environmentMode =>
+      _detectionSettings.environmentMode;
+  bool get _thermalEnabled => _detectionSettings.thermalEnabled;
+  DetectionProfile get _detectionProfile => _detectionSettings.profile;
 
   @override
   void initState() {
     super.initState();
+    _detectionSettings.addListener(_onDetectionSettingsChanged);
+    unawaited(_detectionSettings.load());
+  }
+
+  void _setEnvironmentMode(HeatEnvironmentMode mode) {
+    unawaited(_detectionSettings.setEnvironmentMode(mode));
+  }
+
+  void _setThermalEnabled(bool enabled) {
+    unawaited(_detectionSettings.setThermalEnabled(enabled));
+  }
+
+  void _onDetectionSettingsChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> connectHardware() async {
@@ -181,7 +202,7 @@ class ThermalScanViewState extends State<ThermalScanView> {
       );
     });
 
-    final isHighRisk = scan.analyze().isHighRisk;
+    final isHighRisk = scan.analyze(_detectionProfile).isHighRisk;
     if (!isHighRisk) {
       // 只有風險解除後才重新 armed，避免冷卻期結束後持續重複彈窗。
       _riskEpisodeHandled = false;
@@ -265,7 +286,7 @@ class ThermalScanViewState extends State<ThermalScanView> {
     final position = await _getCurrentPosition();
     if (position == null || !mounted) return;
 
-    final result = scan.analyze();
+    final result = scan.analyze(_detectionProfile);
     final isDanger = decision == SopDecision.confirmedDanger;
     // SOP 的二態結果直接對應地圖顏色與資料庫決策欄位。
     await DatabaseHelper.instance.insertRecord(
@@ -299,6 +320,7 @@ class ThermalScanViewState extends State<ThermalScanView> {
 
   @override
   void dispose() {
+    _detectionSettings.removeListener(_onDetectionSettingsChanged);
     _streamTimer?.cancel();
     _streamTimer = null;
     _snapshotFreezeTimer?.cancel();
@@ -314,7 +336,7 @@ class ThermalScanViewState extends State<ThermalScanView> {
   Widget build(BuildContext context) {
     final scan = _scan;
     final grid64x64 = _grid64x64;
-    final result = scan?.analyze();
+    final result = scan?.analyze(_detectionProfile);
     final levelColor = result == null
         ? Theme.of(context).colorScheme.outline
         : switch (result.level) {
@@ -335,6 +357,57 @@ class ThermalScanViewState extends State<ThermalScanView> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
+                      Card(
+                        child: Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.stretch,
+                            children: [
+                              Text(
+                                '環境模式',
+                                style: Theme.of(context).textTheme.titleMedium,
+                              ),
+                              const SizedBox(height: 8),
+                              SegmentedButton<HeatEnvironmentMode>(
+                                segments: const [
+                                  ButtonSegment(
+                                    value: HeatEnvironmentMode.heatSource,
+                                    label: Text('有熱源'),
+                                    icon: Icon(Icons.local_fire_department),
+                                  ),
+                                  ButtonSegment(
+                                    value: HeatEnvironmentMode.noHeatSource,
+                                    label: Text('無熱源'),
+                                    icon: Icon(Icons.ac_unit),
+                                  ),
+                                ],
+                                selected: {_environmentMode},
+                                onSelectionChanged: (selection) {
+                                  _setEnvironmentMode(selection.first);
+                                },
+                              ),
+                              const Divider(height: 24),
+                              SwitchListTile.adaptive(
+                                contentPadding: EdgeInsets.zero,
+                                title: const Text('熱成像偵測'),
+                                subtitle: Text(
+                                  _thermalEnabled
+                                      ? '已啟用，會保留熱圖資料供分析使用'
+                                      : '未啟用，結果可信度降低且不使用熱成像判定',
+                                ),
+                                value: _thermalEnabled,
+                                onChanged: _setThermalEnabled,
+                              ),
+                              Text(
+                                '目前模式：${_environmentMode.label}｜'
+                                '第一階段不調整既有權重',
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 12),
                       if (result != null)
                         _StatusCard(
                           level: result.level.label,
@@ -379,7 +452,9 @@ class ThermalScanViewState extends State<ThermalScanView> {
                         ),
                       ),
                       const SizedBox(height: 16),
-                      if (grid64x64 != null && result != null) ...[
+                      if (_thermalEnabled &&
+                          grid64x64 != null &&
+                          result != null) ...[
                         ThermalHeatmap64View(
                           temperatures: grid64x64,
                           minTemp: 20.0,
@@ -409,7 +484,16 @@ class ThermalScanViewState extends State<ThermalScanView> {
                             ),
                           ),
                         ),
-                      ],
+                      ] else if (!_thermalEnabled && result != null)
+                        Card(
+                          child: Padding(
+                            padding: const EdgeInsets.all(16),
+                            child: Text(
+                              '熱成像未啟用；目前僅顯示非熱成像資料。',
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
+                          ),
+                        ),
                       const SizedBox(height: 16),
                       FilledButton.icon(
                         onPressed: _isScanning ? _pauseStream : _startStream,
@@ -433,11 +517,10 @@ class ThermalScanViewState extends State<ThermalScanView> {
                     child: ConstrainedBox(
                       constraints: const BoxConstraints(maxWidth: 680),
                       child: SopCard(
-                        deltaT: _sopScan!.analyze().deltaT,
-                        rssi: _sopScan!.analyze().rssi,
+                        deltaT: _sopScan!.analyze(_detectionProfile).deltaT,
+                        rssi: _sopScan!.analyze(_detectionProfile).rssi,
                         snapshotFrozen: _isSnapshotFrozen,
-                        freezeRemainingSeconds:
-                            _snapshotFreezeRemainingSeconds,
+                        freezeRemainingSeconds: _snapshotFreezeRemainingSeconds,
                         minimized: _isSopMinimized,
                         onToggleMinimized: () {
                           setState(

@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../../services/hardware_data_monitor.dart';
+import '../../services/detection_settings.dart';
+import '../../models/scan_data.dart';
 
 class HardwareMonitorView extends StatefulWidget {
   const HardwareMonitorView({super.key});
@@ -14,11 +16,14 @@ class HardwareMonitorView extends StatefulWidget {
 
 class _HardwareMonitorViewState extends State<HardwareMonitorView> {
   final _events = <HardwareDataEvent>[];
+  final _detectionSettings = DetectionSettings.instance;
   StreamSubscription<HardwareDataEvent>? _subscription;
 
   @override
   void initState() {
     super.initState();
+    _detectionSettings.addListener(_onDetectionSettingsChanged);
+    unawaited(_detectionSettings.load());
     _subscription = HardwareDataMonitor.instance.events.listen((event) {
       if (!mounted) return;
       setState(() {
@@ -30,8 +35,13 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
 
   @override
   void dispose() {
+    _detectionSettings.removeListener(_onDetectionSettingsChanged);
     _subscription?.cancel();
     super.dispose();
+  }
+
+  void _onDetectionSettingsChanged() {
+    if (mounted) setState(() {});
   }
 
   Future<void> _copyAll() async {
@@ -54,6 +64,7 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
   Widget build(BuildContext context) {
     return Column(
       children: [
+        _DetectionSettingsCard(settings: _detectionSettings),
         Padding(
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
           child: Row(
@@ -66,9 +77,8 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
               ),
               IconButton(
                 tooltip: '清空紀錄',
-                onPressed: _events.isEmpty
-                    ? null
-                    : () => setState(_events.clear),
+                onPressed:
+                    _events.isEmpty ? null : () => setState(_events.clear),
                 icon: const Icon(Icons.delete_sweep_outlined),
               ),
             ],
@@ -108,6 +118,62 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
                 ),
         ),
       ],
+    );
+  }
+}
+
+class _DetectionSettingsCard extends StatelessWidget {
+  const _DetectionSettingsCard({required this.settings});
+
+  final DetectionSettings settings;
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.fromLTRB(16, 12, 16, 8),
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              '偵測設定',
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            SegmentedButton<HeatEnvironmentMode>(
+              segments: const [
+                ButtonSegment(
+                  value: HeatEnvironmentMode.heatSource,
+                  label: Text('有熱源'),
+                  icon: Icon(Icons.local_fire_department),
+                ),
+                ButtonSegment(
+                  value: HeatEnvironmentMode.noHeatSource,
+                  label: Text('無熱源'),
+                  icon: Icon(Icons.ac_unit),
+                ),
+              ],
+              selected: {settings.environmentMode},
+              onSelectionChanged: (selection) {
+                unawaited(settings.setEnvironmentMode(selection.first));
+              },
+            ),
+            const Divider(height: 24),
+            SwitchListTile.adaptive(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('熱成像偵測'),
+              subtitle: Text(
+                settings.thermalEnabled ? '已啟用' : '未啟用，結果可信度降低且不使用熱成像判定',
+              ),
+              value: settings.thermalEnabled,
+              onChanged: (enabled) {
+                unawaited(settings.setThermalEnabled(enabled));
+              },
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
