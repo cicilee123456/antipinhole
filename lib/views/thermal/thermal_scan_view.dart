@@ -112,7 +112,7 @@ class ThermalScanViewState extends State<ThermalScanView> {
     _streamTimer = null;
     setState(() {
       _isConnecting = true;
-      _connectionStatus = '正在連線 ESP32：172.20.10.3...';
+      _connectionStatus = '正在連線 ESP32：192.168.4.1...';
     });
 
     _usingEsp32 = true;

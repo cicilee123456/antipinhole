@@ -7,6 +7,7 @@ import 'package:flutter_web_bluetooth/flutter_web_bluetooth.dart' as web_ble;
 import 'package:http/http.dart' as http;
 
 import '../models/cc1101_diagnostic_sample.dart';
+import 'hardware_data_monitor.dart';
 
 class Cc1101DiagnosticService {
   Cc1101DiagnosticService({
@@ -245,7 +246,7 @@ class Cc1101DiagnosticService {
         if (decoded is! Map<String, dynamic>) {
           throw const FormatException('CC1101 BLE 回應必須是 JSON 物件');
         }
-        _controller.add(Cc1101DiagnosticSample.fromJson(decoded));
+        _publish(Cc1101DiagnosticSample.fromJson(decoded), jsonText);
       }
     } catch (error, stackTrace) {
       _bleJsonBuffer = '';
@@ -266,13 +267,22 @@ class Cc1101DiagnosticService {
       if (decoded is! Map<String, dynamic>) {
         throw const FormatException('ESP32 回應必須是 JSON 物件');
       }
-      _controller.add(Cc1101DiagnosticSample.fromJson(decoded));
+      _publish(Cc1101DiagnosticSample.fromJson(decoded), response.body);
     } catch (error, stackTrace) {
       _controller.addError(error, stackTrace);
       if (rethrowError) rethrow;
     } finally {
       _requestInFlight = false;
     }
+  }
+
+  void _publish(Cc1101DiagnosticSample sample, String rawText) {
+    HardwareDataMonitor.instance.add(
+      source: 'CC1101',
+      rawText: rawText,
+      cc1101: sample,
+    );
+    _controller.add(sample);
   }
 
   Future<void> stop() async {

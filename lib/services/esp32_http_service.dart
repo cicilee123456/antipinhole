@@ -4,10 +4,11 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/scan_data.dart';
+import '../models/cc1101_diagnostic_sample.dart';
 import 'hardware_data_monitor.dart';
 
 class Esp32HttpService {
-  Esp32HttpService({String baseUrl = 'http://172.20.10.3'})
+  Esp32HttpService({String baseUrl = 'http://192.168.4.1'})
       : _endpoint = Uri.parse('$baseUrl/data');
 
   final Uri _endpoint;
@@ -57,9 +58,8 @@ class Esp32HttpService {
   }
 
   Future<ScanData> _fetchScan() async {
-    final response = await _client
-        .get(_endpoint)
-        .timeout(const Duration(seconds: 2));
+    final response =
+        await _client.get(_endpoint).timeout(const Duration(seconds: 2));
     if (response.statusCode != 200) {
       throw StateError('ESP32 HTTP ${response.statusCode}');
     }
@@ -70,10 +70,12 @@ class Esp32HttpService {
     }
     try {
       final scan = ScanData.fromEsp32Json(decoded);
+      final cc1101 = Cc1101DiagnosticSample.fromJson(decoded);
       HardwareDataMonitor.instance.add(
         source: 'ESP32 HTTP',
         rawText: response.body,
         scan: scan,
+        cc1101: cc1101,
       );
       return scan;
     } on FormatException catch (error) {

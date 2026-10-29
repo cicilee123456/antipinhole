@@ -37,12 +37,12 @@ int lastLqi = 0;
 bool lastCrcOk = false;
 
 class BleServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer*) override {
+  void onConnect(NimBLEServer*, NimBLEConnInfo&) override {
     bleConnected = true;
     Serial.println("BLE connected");
   }
 
-  void onDisconnect(NimBLEServer*) override {
+  void onDisconnect(NimBLEServer*, NimBLEConnInfo&, int) override {
     bleConnected = false;
     Serial.println("BLE disconnected; restarting advertising");
     NimBLEDevice::startAdvertising();

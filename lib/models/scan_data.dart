@@ -2,6 +2,8 @@ import 'dart:typed_data';
 
 import 'dart:math' as math;
 
+import 'vs1838b_sample.dart';
+
 // 風險等級的數值與顯示文字集中管理，避免 UI 各自定義門檻名稱。
 enum DetectionLevel {
   safe(0, '安全'),
@@ -42,6 +44,7 @@ class ScanData {
     this.capturedAt,
     this.irDetected = false,
     this.wifiDeviceCount = 0,
+    this.vs1838b,
   }) : assert(thermalGrid.length == 64, 'thermalGrid 必須包含 64 筆資料');
 
   factory ScanData.fromJson(Map<String, dynamic> json) {
@@ -98,6 +101,7 @@ class ScanData {
       capturedAt: DateTime.now().toIso8601String(),
       irDetected: json['ir'] == 1 || json['ir'] == true,
       wifiDeviceCount: (json['wifi'] as num?)?.toInt() ?? 0,
+      vs1838b: Vs1838bSample.tryFromJson(json),
     );
   }
 
@@ -153,6 +157,7 @@ class ScanData {
       wifiDeviceCount: (json['wifi_devices'] as num?)?.toInt() ??
           (json['wifi'] as num?)?.toInt() ??
           0,
+      vs1838b: Vs1838bSample.tryFromJson(json),
     );
   }
 
@@ -163,6 +168,7 @@ class ScanData {
   final String? capturedAt;
   final bool irDetected;
   final int wifiDeviceCount;
+  final Vs1838bSample? vs1838b;
 
   ScanResult analyze([
     DetectionProfile profile = const DetectionProfile(),

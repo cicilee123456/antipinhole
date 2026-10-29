@@ -184,9 +184,8 @@ class ThermoCamBleService {
     }
   }
 
-  String _toHex(List<int> bytes) => bytes
-      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-      .join(' ');
+  String _toHex(List<int> bytes) =>
+      bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(' ');
 
   Future<void> dispose() async {
     await _valueSubscription?.cancel();
