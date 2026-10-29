@@ -37,10 +37,23 @@ class Cc1101DiagnosticSample {
     return Cc1101DiagnosticSample(
       capturedAt: _parseDate(values['captured_at'] ?? values['timestamp']),
       rssi: _toDouble(
-        values['cc1101_rssi'] ?? values['rf_rssi'] ?? values['rssi'] ?? values['rf'],
+        values['cc1101_rssi'] ??
+            values['CC1101RSSI'] ??
+            values['CC1101_RSSI'] ??
+            values['cc1101RSSI'] ??
+            values['rf_cc1101_rssi'] ??
+            values['rssi'] ??
+            values['rf_rssi'] ??
+            values['rf'],
       ),
-      lqi: _toDouble(values['cc1101_lqi'] ?? values['lqi']),
-      crcOk: _toBool(values['cc1101_crc_ok'] ?? values['crc_ok']),
+      lqi: _toDouble(
+        values['cc1101_lqi'] ?? values['CC1101LQI'] ?? values['lqi'],
+      ),
+      crcOk: _toBool(
+        values['cc1101_crc_ok'] ??
+            values['CC1101CRCOK'] ??
+            values['crc_ok'],
+      ),
       receivedPackets: receivedPackets,
       lostPackets: lostPackets,
       per: per,

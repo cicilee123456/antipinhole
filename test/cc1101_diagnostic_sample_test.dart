@@ -25,6 +25,16 @@ void main() {
     expect(sample.distanceMeters, 5);
   });
 
+  test('parses ESP32 CC1101RSSI field aliases', () {
+    final sample = Cc1101DiagnosticSample.fromJson({
+      'CC1101RSSI': -73.5,
+      'cc1101_lqi': 38,
+    });
+
+    expect(sample.rssi, -73.5);
+    expect(sample.lqi, 38);
+  });
+
   test('keeps unsupported metrics unavailable instead of inventing values', () {
     final sample = Cc1101DiagnosticSample.fromJson({'rf_rssi': -70});
 

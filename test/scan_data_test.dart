@@ -28,6 +28,16 @@ void main() {
       expect(result.weightedScore, closeTo(0.6 + 0.4, 0.0001));
     });
   });
+
+  test('parses ESP32 thermal_grid and ESP32RSSI fields', () {
+    final scan = ScanData.fromEsp32Json({
+      'thermal_grid': List<double>.filled(64, 28),
+      'ESP32RSSI': -65,
+    });
+
+    expect(scan.thermalGrid, hasLength(64));
+    expect(scan.rssi, -65);
+  });
 }
 
 ScanData _scan({required double deltaT, required double rssi}) {

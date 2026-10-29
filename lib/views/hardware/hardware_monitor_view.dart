@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
+
+import 'package:flutter/foundation.dart';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -31,6 +33,7 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
   bool _isConnecting = false;
   bool _isScanning = false;
   bool _isSimulating = false;
+  String? _connectionError;
 
   @override
   void initState() {
@@ -81,6 +84,8 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
     _scanSubscription = _esp32Service.scans.listen(
       (_) {},
       onError: (Object error) {
+        if (!mounted) return;
+        setState(() => _connectionError = error.toString());
         unawaited(_startSimulator());
       },
     );
@@ -91,8 +96,12 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
         _isConnecting = false;
         _isScanning = true;
         _isSimulating = false;
+        _connectionError = null;
       });
-    } catch (_) {
+    } catch (error) {
+      if (mounted) {
+        setState(() => _connectionError = error.toString());
+      }
       await _startSimulator();
     }
   }
@@ -209,6 +218,25 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.labelMedium,
                 ),
+                if (_isSimulating && _connectionError != null) ...[
+                  const SizedBox(height: 8),
+                  Card(
+                    color: Theme.of(context).colorScheme.errorContainer,
+                    child: Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: Text(
+                        kIsWeb
+                            ? 'Web 連線失敗：請讓電腦連上 AntiPinhole-ESP32，並從 HTTP 網址開啟 App；若 App 使用 HTTPS，瀏覽器可能禁止連線到 http://192.168.4.1/data。\n${_connectionError!}'
+                            : '無法連線 http://192.168.4.1/data：請確認手機已連上 AntiPinhole-ESP32。\n${_connectionError!}',
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color:
+                              Theme.of(context).colorScheme.onErrorContainer,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    ),
+                  ),
+                ],
               ],
               const SizedBox(height: 12),
               Row(
