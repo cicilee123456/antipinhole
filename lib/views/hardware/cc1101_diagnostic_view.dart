@@ -5,13 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-import 'package:geolocator/geolocator.dart';
-
-import '../../models/detection_record.dart';
 import '../../models/cc1101_diagnostic_sample.dart';
-import '../../services/cc1101_diagnostic_service.dart';
-import '../../services/database_helper.dart';
-import '../thermal/sop_dialog.dart';
+import '../../services/hardware_connection_service.dart';
+import '../../services/hardware_data_monitor.dart';
 
 class Cc1101DiagnosticView extends StatefulWidget {
   const Cc1101DiagnosticView({super.key});
@@ -22,18 +18,9 @@ class Cc1101DiagnosticView extends StatefulWidget {
 
 class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
   static const _storageKey = 'cc1101_diagnostic_samples';
-  static const _riskRssiThreshold = -89.0;
-  final _service = Cc1101DiagnosticService();
-  final _baseUrlController = TextEditingController(text: 'http://192.168.4.1');
   final _samples = <Cc1101DiagnosticSample>[];
-  StreamSubscription<Cc1101DiagnosticSample>? _subscription;
-  String? _error;
-  bool _isRunning = false;
-  bool _useBluetooth = false;
-  bool _isSopActive = false;
-  bool _riskEpisodeHandled = false;
-  DateTime? _lastSopClosedTime;
-  static const _sopCooldown = Duration(seconds: 20);
+  HardwareConnectionService? _service;
+  StreamSubscription<HardwareDataEvent>? _subscription;
 
   @override
   void initState() {
@@ -41,146 +28,36 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
     unawaited(_loadSamples());
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final service = HardwareConnectionScope.of(context);
+    if (identical(service, _service)) return;
+    _subscription?.cancel();
+    _service = service;
+    final latestSample = service.latestCc1101Sample;
+    if (latestSample != null) _addSample(latestSample);
+    _subscription = service.events.listen(_onHardwareEvent);
+  }
+
   Cc1101DiagnosticSample? get _latest =>
       _samples.isEmpty ? null : _samples.last;
 
-  Future<void> _start() async {
-    if (_isRunning) return;
-    setState(() {
-      _isRunning = true;
-      _error = null;
-    });
-    await _subscription?.cancel();
-    _subscription = _service.samples.listen(
-      _addSample,
-      onError: (Object error) {
-        if (mounted) setState(() => _error = error.toString());
-      },
-    );
-    try {
-      if (!_useBluetooth) {
-        _service.updateBaseUrl(_baseUrlController.text);
-      }
-      await _service.start(bluetooth: _useBluetooth);
-    } catch (error) {
-      await _service.stop();
-      if (!mounted) return;
-      setState(() {
-        _isRunning = false;
-        _error = error.toString();
-      });
-    }
-  }
-
-  Future<void> _stop() async {
-    await _service.stop();
-    await _subscription?.cancel();
-    _subscription = null;
-    if (mounted) {
-      setState(() => _isRunning = false);
-    }
+  void _onHardwareEvent(HardwareDataEvent event) {
+    final sample = event.cc1101Sample;
+    if (sample != null) _addSample(sample);
   }
 
   void _addSample(Cc1101DiagnosticSample sample) {
     if (!mounted) return;
+    if (_samples.any((item) => item.toJsonLine() == sample.toJsonLine())) {
+      return;
+    }
     setState(() {
       _samples.add(sample);
       if (_samples.length > 200) _samples.removeAt(0);
-      _error = null;
     });
     unawaited(_saveSamples());
-    _checkRiskAutomatically(sample);
-  }
-
-  void _checkRiskAutomatically(Cc1101DiagnosticSample sample) {
-    final rssi = sample.rssi;
-    if (rssi == null || rssi <= _riskRssiThreshold) {
-      _riskEpisodeHandled = false;
-      return;
-    }
-    if (_riskEpisodeHandled) return;
-    if (_isSopActive) return;
-    final lastClosed = _lastSopClosedTime;
-    if (lastClosed != null &&
-        DateTime.now().difference(lastClosed) < _sopCooldown) {
-      return;
-    }
-
-    _riskEpisodeHandled = true;
-    _isSopActive = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _handleSop(sample, rssi);
-    });
-  }
-
-  Future<void> _handleSop(
-    Cc1101DiagnosticSample sample,
-    double rssi,
-  ) async {
-    try {
-      final decision = await SopDialog.show(context);
-      if (decision != null) {
-        final persisted = await _persistSopDecision(sample, decision);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                persisted
-                    ? decision == SopDecision.confirmedDanger
-                        ? '複檢異常：已記錄紅色高風險事件'
-                        : '複檢正常：已記錄黃色待驗證事件'
-                    : '定位服務不可用，無法寫入事件紀錄',
-              ),
-              backgroundColor: persisted
-                  ? decision == SopDecision.confirmedDanger
-                      ? Colors.red
-                      : Colors.amber.shade800
-                  : Colors.orange,
-            ),
-          );
-        }
-      } else if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('SOP 已關閉，未建立事件紀錄')),
-        );
-      }
-    } finally {
-      _isSopActive = false;
-      _lastSopClosedTime = DateTime.now();
-    }
-  }
-
-  Future<bool> _persistSopDecision(
-    Cc1101DiagnosticSample sample,
-    SopDecision decision,
-  ) async {
-    if (!await Geolocator.isLocationServiceEnabled()) return false;
-    var permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-    if (permission == LocationPermission.denied ||
-        permission == LocationPermission.deniedForever) {
-      return false;
-    }
-    final position = await Geolocator.getCurrentPosition();
-    final isDanger = decision == SopDecision.confirmedDanger;
-    await DatabaseHelper.instance.insertRecord(
-      DetectionRecord(
-        timestamp: DateTime.now().toUtc(),
-        maxDeltaT: 0,
-        maxRSSI: sample.rssi ?? 0,
-        latitude: position.latitude,
-        longitude: position.longitude,
-        statusColor: isDanger ? 'RED' : 'YELLOW',
-        userDecision: isDanger ? 'CONFIRMED_DANGER' : 'UNCERTAIN_WARNING',
-        adviceText: isDanger
-            ? '複檢異常：請立即檢查該位置並依現場安全程序處置。'
-            : '複檢正常（疑似誤判）：建議貼膠帶遮蔽可疑位置或拔除電源後再驗證。',
-      ),
-    );
-    return true;
   }
 
   Future<void> _loadSamples() async {
@@ -197,6 +74,17 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
         // 忽略無法恢復的單筆紀錄，保留其他有效資料。
       }
     }
+    for (final sample in _samples) {
+      if (!restored.any((item) => item.toJsonLine() == sample.toJsonLine())) {
+        restored.add(sample);
+      }
+    }
+    final latestSample = _service?.latestCc1101Sample;
+    if (latestSample != null &&
+        !restored.any(
+            (sample) => sample.toJsonLine() == latestSample.toJsonLine())) {
+      restored.add(latestSample);
+    }
     if (!mounted) return;
     setState(() {
       _samples
@@ -205,6 +93,7 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
             ? restored.sublist(restored.length - 200)
             : restored);
     });
+    if (latestSample != null) unawaited(_saveSamples());
   }
 
   Future<void> _saveSamples() async {
@@ -234,14 +123,22 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
   @override
   void dispose() {
     _subscription?.cancel();
-    _service.dispose();
-    _baseUrlController.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final service = HardwareConnectionScope.of(context);
     final sample = _latest;
+    final activeConnection = service.activeConnection;
+    final failedConnection = service.failedConnection;
+    final connectionStatus = activeConnection == null
+        ? service.isSimulating
+            ? '模擬資料中'
+            : failedConnection == null
+                ? '等待硬體監控頁建立連線'
+                : '${_connectionName(failedConnection)} · Error: ${service.stateFor(failedConnection).error}'
+        : '${_connectionName(activeConnection)} · ${_statusLabel(service.stateFor(activeConnection).status)}';
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Center(
@@ -260,61 +157,14 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
                           style: Theme.of(context).textTheme.titleLarge),
                       const SizedBox(height: 8),
                       const Text(
-                          '此頁會自動收集無線訊號資料；RSSI 高於 -89 dBm 時會自動觸發高風險 SOP。'),
-                      const SizedBox(height: 16),
-                      SegmentedButton<bool>(
-                        segments: const [
-                          ButtonSegment<bool>(
-                            value: false,
-                            label: Text('Wi-Fi / HTTP'),
-                            icon: Icon(Icons.wifi),
-                          ),
-                          ButtonSegment<bool>(
-                            value: true,
-                            label: Text('Bluetooth BLE'),
-                            icon: Icon(Icons.bluetooth),
-                          ),
-                        ],
-                        selected: {_useBluetooth},
-                        onSelectionChanged: _isRunning
-                            ? null
-                            : (selection) {
-                                setState(() => _useBluetooth = selection.first);
-                              },
-                      ),
-                      const SizedBox(height: 8),
-                      if (!_useBluetooth)
-                        TextField(
-                          controller: _baseUrlController,
-                          enabled: !_isRunning,
-                          keyboardType: TextInputType.url,
-                          decoration: const InputDecoration(
-                            labelText: 'ESP32 Wi-Fi 位址',
-                            hintText: '例如 http://192.168.4.1',
-                            border: OutlineInputBorder(),
-                          ),
-                        ),
-                      if (!_useBluetooth) const SizedBox(height: 8),
-                      Text(
-                        _useBluetooth
-                            ? '將搜尋 $_bluetoothDeviceName 並接收 BLE JSON 通知'
-                            : '每 500 ms 讀取 ${_baseUrlController.text.trim()}/data',
-                      ),
+                          '本頁只顯示共用連線服務收到的 CC1101 資料；連線請回到「硬體監控」頁操作。高風險 SOP 由共用熱成像風險規則統一觸發。'),
+                      const SizedBox(height: 12),
+                      Text(connectionStatus),
                       const SizedBox(height: 16),
                       Wrap(
                         spacing: 8,
                         runSpacing: 8,
                         children: [
-                          FilledButton.icon(
-                            onPressed: _isRunning ? null : _start,
-                            icon: const Icon(Icons.play_arrow),
-                            label: const Text('開始測試'),
-                          ),
-                          OutlinedButton.icon(
-                            onPressed: _isRunning ? _stop : null,
-                            icon: const Icon(Icons.stop),
-                            label: const Text('停止測試'),
-                          ),
                           OutlinedButton.icon(
                             onPressed: _samples.isEmpty ? null : _copySamples,
                             icon: const Icon(Icons.copy),
@@ -328,13 +178,9 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
                         ],
                       ),
                       const SizedBox(height: 12),
-                      Text(_isRunning ? '測試中，每 500 ms 讀取一次' : '測試尚未開始'),
-                      if (_error != null) ...[
-                        const SizedBox(height: 8),
-                        Text(_error!,
-                            style: TextStyle(
-                                color: Theme.of(context).colorScheme.error)),
-                      ],
+                      Text(activeConnection != null || service.isSimulating
+                          ? '即時資料會自動加入下方紀錄'
+                          : '尚未連線'),
                     ],
                   ),
                 ),
@@ -384,9 +230,6 @@ class _Cc1101DiagnosticViewState extends State<Cc1101DiagnosticView> {
       ),
     );
   }
-
-  String get _bluetoothDeviceName =>
-      Cc1101DiagnosticService.defaultBluetoothDeviceName;
 }
 
 class _MetricsCard extends StatelessWidget {
@@ -466,6 +309,17 @@ String _formatPackets(Cc1101DiagnosticSample? sample) {
   }
   return '${sample?.receivedPackets ?? '--'} / ${sample?.lostPackets ?? '--'}';
 }
+
+String _connectionName(HardwareConnectionType type) => switch (type) {
+      HardwareConnectionType.thermocamBluetooth => 'ThermoCam_BLE',
+    };
+
+String _statusLabel(HardwareConnectionStatus status) => switch (status) {
+      HardwareConnectionStatus.disconnected => 'Disconnected',
+      HardwareConnectionStatus.connecting => 'Connecting',
+      HardwareConnectionStatus.connected => 'Connected',
+      HardwareConnectionStatus.error => 'Error',
+    };
 
 String _format(DateTime value) {
   final local = value.toLocal();

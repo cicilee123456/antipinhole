@@ -1,386 +1,152 @@
-import 'dart:async';
-import 'dart:convert';
-
 import 'package:flutter/material.dart';
-import 'package:geolocator/geolocator.dart';
 
-import '../../models/detection_record.dart';
 import '../../models/scan_data.dart';
-import '../../services/database_helper.dart';
-import '../../services/esp32_http_service.dart';
-import '../../services/hardware_data_monitor.dart';
-import '../../services/thermocam_ble_service.dart';
-import '../../services/thermal_simulator.dart';
+import '../../services/hardware_connection_service.dart';
 import '../../utils/thermal_interpolator.dart';
 import 'thermal_heatmap64_view.dart';
-import 'sop_dialog.dart';
 
-// 熱成像子模組：負責產生掃描、顯示熱圖與呈現風險結果。
-class ThermalScanView extends StatefulWidget {
+class ThermalScanView extends StatelessWidget {
   const ThermalScanView({super.key});
 
   @override
-  State<ThermalScanView> createState() => ThermalScanViewState();
+  Widget build(BuildContext context) {
+    final service = HardwareConnectionScope.of(context);
+    final scan = service.latestScan;
+    final result = scan?.analyze();
+    final activeConnection = service.activeConnection;
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 680),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _ConnectionSummary(
+                service: service,
+                activeConnection: activeConnection,
+              ),
+              const SizedBox(height: 12),
+              if (result == null)
+                const Card(
+                  child: AspectRatio(
+                    aspectRatio: 1,
+                    child: Center(child: Text('尚未收到掃描資料')),
+                  ),
+                )
+              else ...[
+                _StatusCard(
+                  level: result.level.label,
+                  color: switch (result.level) {
+                    DetectionLevel.safe => Colors.green,
+                    DetectionLevel.warning => Colors.orange,
+                    DetectionLevel.highRisk => Colors.red,
+                  },
+                  deviceName: scan!.deviceName,
+                ),
+                const SizedBox(height: 12),
+                ThermalHeatmap64View(
+                  temperatures: _interpolate(scan),
+                  minTemp: 20,
+                  maxTemp: 40,
+                  warningThreshold: 35,
+                ),
+                const SizedBox(height: 12),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Wrap(
+                      alignment: WrapAlignment.spaceBetween,
+                      spacing: 32,
+                      runSpacing: 16,
+                      children: [
+                        _Metric(
+                          label: '溫差 ΔT',
+                          value: '${result.deltaT.toStringAsFixed(1)} °C',
+                        ),
+                        _Metric(
+                          label: 'RSSI',
+                          value: '${result.rssi.toStringAsFixed(1)} dBm',
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 12),
+              const Text(
+                'ThermoCam_BLE 連線與掃描請由「硬體監控」頁面操作；此頁顯示共用即時資料。',
+                textAlign: TextAlign.center,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  List<List<double>> _interpolate(ScanData scan) {
+    const size = ThermalHeatmap64View.gridSize;
+    final values = ThermalInterpolator.interpolate8x8(
+      scan.thermalGrid,
+      targetSize: size,
+    );
+    return List<List<double>>.generate(
+      size,
+      (row) => List<double>.generate(
+        size,
+        (column) => values[row * size + column],
+        growable: false,
+      ),
+      growable: false,
+    );
+  }
 }
 
-class ThermalScanViewState extends State<ThermalScanView> {
-  static const _simulator = ThermalSimulator();
-  final _bleService = ThermoCamBleService();
-  final _esp32Service = Esp32HttpService();
-  ScanData? _scan;
-  List<List<double>>? _grid64x64;
-  bool _isScanning = false;
-  Timer? _streamTimer;
-  StreamSubscription<ScanData>? _bleSubscription;
-  StreamSubscription<ScanData>? _esp32Subscription;
-  String _connectionStatus = '尚未連接硬體，按「開始即時掃描」可使用模擬資料';
-  bool _usingHardware = false;
-  bool _usingEsp32 = false;
-  bool _isConnecting = false;
-  bool _isSopActive = false;
-  bool _riskEpisodeHandled = false;
-  DateTime? _lastSopClosedTime;
-  static const _sopCooldown = Duration(seconds: 20);
+class _ConnectionSummary extends StatelessWidget {
+  const _ConnectionSummary({
+    required this.service,
+    required this.activeConnection,
+  });
 
-  @override
-  void initState() {
-    super.initState();
-  }
-
-  Future<void> connectHardware() async {
-    if (_isConnecting || _usingHardware || _usingEsp32) return;
-
-    _streamTimer?.cancel();
-    _streamTimer = null;
-    setState(() {
-      _isConnecting = true;
-      _connectionStatus = '請在瀏覽器視窗中選擇 ThermoCam_BLE...';
-    });
-
-    try {
-      await _bleService.connect();
-      _bleSubscription = _bleService.scans.listen(
-        (scan) => _updateScan(scan, recordEvent: false),
-      );
-      if (mounted) {
-        setState(() {
-          _usingHardware = true;
-          _isScanning = true;
-          _isConnecting = false;
-          _connectionStatus = '已連線 ThermoCam_BLE';
-        });
-      }
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _isConnecting = false;
-        _connectionStatus = '藍牙連線失敗：$error，按「開始即時掃描」使用模擬資料';
-      });
-    }
-  }
-
-  Future<void> connectEsp32() async {
-    if (_isConnecting || _usingHardware || _usingEsp32) return;
-
-    _streamTimer?.cancel();
-    _streamTimer = null;
-    setState(() {
-      _isConnecting = true;
-      _connectionStatus = '正在連線 ESP32：172.20.10.3...';
-    });
-
-    _usingEsp32 = true;
-    _esp32Subscription = _esp32Service.scans.listen(
-      (scan) => _updateScan(scan, recordEvent: false),
-      onError: (Object error) {
-        if (mounted) setState(() => _connectionStatus = 'ESP32 讀取失敗：$error');
-      },
-    );
-    try {
-      await _esp32Service.start();
-      if (mounted) {
-        setState(() {
-          _isScanning = true;
-          _isConnecting = false;
-          _connectionStatus = '已連線 ESP32 Wi-Fi';
-        });
-      }
-    } catch (error) {
-      _usingEsp32 = false;
-      await _esp32Subscription?.cancel();
-      _esp32Subscription = null;
-      if (!mounted) return;
-      setState(() {
-        _isConnecting = false;
-        _connectionStatus = 'ESP32 連線失敗：$error，按「開始即時掃描」使用模擬資料';
-      });
-    }
-  }
-
-  void _startStream() {
-    if (_usingHardware) return;
-    if (_usingEsp32) {
-      unawaited(_esp32Service.start());
-      if (mounted) setState(() => _isScanning = true);
-      return;
-    }
-    _startSimulatorStream();
-  }
-
-  void _startSimulatorStream() {
-    if (_streamTimer != null) return;
-
-    setState(() => _isScanning = true);
-    _streamTimer = Timer.periodic(
-      const Duration(milliseconds: 300),
-      (_) => _updateScan(
-        _simulator.scan(),
-        source: '熱成像模擬資料',
-      ),
-    );
-  }
-
-  void _pauseStream() {
-    if (_usingHardware || _usingEsp32) {
-      if (_usingEsp32) unawaited(_esp32Service.stop());
-      setState(() => _isScanning = false);
-      return;
-    }
-    _streamTimer?.cancel();
-    _streamTimer = null;
-    if (mounted) setState(() => _isScanning = false);
-  }
-
-  void _updateScan(
-    ScanData scan, {
-    String source = 'ThermoCam BLE',
-    bool recordEvent = true,
-  }) {
-    final interpolatedGrid = ThermalInterpolator.interpolate8x8(
-      scan.thermalGrid,
-      targetSize: 64,
-    );
-
-    if (!mounted) return;
-    setState(() {
-      _scan = scan;
-      _grid64x64 = List<List<double>>.generate(
-        64,
-        (row) => List<double>.generate(
-          64,
-          (column) => interpolatedGrid[row * 64 + column],
-          growable: false,
-        ),
-        growable: false,
-      );
-    });
-    if (recordEvent) {
-      HardwareDataMonitor.instance.add(
-        source: source,
-        rawText: jsonEncode({
-          'id': scan.id,
-          'device_name': scan.deviceName,
-          'rssi': scan.rssi,
-          'thermal_grid': scan.thermalGrid,
-          'captured_at': scan.capturedAt,
-          'ir_detected': scan.irDetected,
-          'wifi_device_count': scan.wifiDeviceCount,
-        }),
-        scan: scan,
-      );
-    }
-
-    final isHighRisk = scan.analyze().isHighRisk;
-    if (!isHighRisk) {
-      _riskEpisodeHandled = false;
-    }
-    if (isHighRisk && !_riskEpisodeHandled) {
-      _riskEpisodeHandled = true;
-      _showSopForScan(scan);
-    }
-  }
-
-  void _showSopForScan(ScanData scan) {
-    if (_isSopActive) return;
-    final lastClosed = _lastSopClosedTime;
-    if (lastClosed != null &&
-        DateTime.now().difference(lastClosed) < _sopCooldown) {
-      return;
-    }
-
-    _isSopActive = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!mounted) return;
-      try {
-        final decision = await SopDialog.show(context);
-        if (decision != null) {
-          await _persistSopDecision(scan, decision);
-        }
-      } finally {
-        _isSopActive = false;
-        _lastSopClosedTime = DateTime.now();
-      }
-    });
-  }
-
-  Future<void> _persistSopDecision(
-    ScanData scan,
-    SopDecision decision,
-  ) async {
-    final position = await _getCurrentPosition();
-    if (position == null || !mounted) return;
-
-    final result = scan.analyze();
-    final isDanger = decision == SopDecision.confirmedDanger;
-    await DatabaseHelper.instance.insertRecord(
-      DetectionRecord(
-        timestamp: DateTime.now().toUtc(),
-        maxDeltaT: result.deltaT,
-        maxRSSI: result.rssi,
-        latitude: position.latitude,
-        longitude: position.longitude,
-        statusColor: isDanger ? 'RED' : 'YELLOW',
-        userDecision: isDanger ? 'CONFIRMED_DANGER' : 'UNCERTAIN_WARNING',
-        adviceText: isDanger
-            ? '複檢異常：請立即檢查該位置並依現場安全程序處置。'
-            : '複檢正常（疑似誤判）：建議貼膠帶遮蔽可疑位置或拔除電源後再驗證。',
-      ),
-    );
-  }
-
-  Future<Position?> _getCurrentPosition() async {
-    if (!await Geolocator.isLocationServiceEnabled()) return null;
-    var permission = await Geolocator.checkPermission();
-    if (permission == LocationPermission.denied) {
-      permission = await Geolocator.requestPermission();
-    }
-    if (permission == LocationPermission.denied ||
-        permission == LocationPermission.deniedForever) {
-      return null;
-    }
-    return Geolocator.getCurrentPosition();
-  }
-
-  @override
-  void dispose() {
-    _streamTimer?.cancel();
-    _streamTimer = null;
-    _bleSubscription?.cancel();
-    _esp32Subscription?.cancel();
-    _bleService.dispose();
-    _esp32Service.dispose();
-    super.dispose();
-  }
+  final HardwareConnectionService service;
+  final HardwareConnectionType? activeConnection;
 
   @override
   Widget build(BuildContext context) {
-    final scan = _scan;
-    final grid64x64 = _grid64x64;
-    final result = scan?.analyze();
-    final levelColor = result == null
-        ? Theme.of(context).colorScheme.outline
-        : switch (result.level) {
-            DetectionLevel.safe => Colors.green,
-            DetectionLevel.warning => Colors.orange,
-            DetectionLevel.highRisk => Colors.red,
-          };
+    final failedConnection = service.failedConnection;
+    final status = activeConnection != null
+        ? _statusLabel(service.stateFor(activeConnection!).status)
+        : service.isSimulating
+            ? '模擬掃描中'
+            : failedConnection == null
+                ? 'Disconnected'
+                : '${_connectionName(failedConnection)} · Error: ${service.stateFor(failedConnection).error}';
 
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        return SingleChildScrollView(
-          padding: const EdgeInsets.all(20),
-          child: Center(
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 680),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (result != null)
-                    _StatusCard(
-                      level: result.level.label,
-                      color: levelColor,
-                      deviceName: scan!.deviceName,
-                    )
-                  else
-                    const Text('尚未開始掃描'),
-                  const SizedBox(height: 8),
-                  Text(_connectionStatus),
-                  const SizedBox(height: 16),
-                  OutlinedButton.icon(
-                    onPressed: _isConnecting || _usingHardware || _usingEsp32
-                        ? null
-                        : connectHardware,
-                    icon: _isConnecting
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.bluetooth),
-                    label: Text(
-                      _isConnecting
-                          ? '等待硬體選擇...'
-                          : _usingHardware
-                              ? '硬體已連線'
-                              : '連接 ThermoCam 硬體',
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  OutlinedButton.icon(
-                    onPressed: _isConnecting || _usingHardware || _usingEsp32
-                        ? null
-                        : connectEsp32,
-                    icon: const Icon(Icons.router),
-                    label: Text(
-                      _usingEsp32 ? 'ESP32 Wi-Fi 已連線' : '連接 ESP32 Wi-Fi',
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  if (grid64x64 != null && result != null) ...[
-                    ThermalHeatmap64View(
-                      temperatures: grid64x64,
-                      minTemp: 20.0,
-                      maxTemp: 40.0,
-                      warningThreshold: 35.0,
-                    ),
-                    const SizedBox(height: 16),
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(20),
-                        child: Wrap(
-                          alignment: WrapAlignment.spaceBetween,
-                          spacing: 32,
-                          runSpacing: 16,
-                          children: [
-                            _Metric(
-                              label: '溫差 ΔT',
-                              value: '${result.deltaT.toStringAsFixed(1)} °C',
-                            ),
-                            _Metric(
-                              label: 'RSSI',
-                              value: '${result.rssi.toStringAsFixed(1)} dBm',
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 16),
-                  FilledButton.icon(
-                    onPressed: _isScanning ? _pauseStream : _startStream,
-                    icon: const Icon(Icons.refresh),
-                    label: Text(
-                      _isScanning ? '暫停即時掃描' : '開始即時掃描',
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        );
-      },
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.sync),
+        title: const Text('共用連線狀態'),
+        subtitle: Text(
+          activeConnection == null
+              ? status
+              : '${_connectionName(activeConnection!)} · $status',
+        ),
+      ),
     );
   }
+
+  String _statusLabel(HardwareConnectionStatus status) => switch (status) {
+        HardwareConnectionStatus.disconnected => 'Disconnected',
+        HardwareConnectionStatus.connecting => 'Connecting',
+        HardwareConnectionStatus.connected => 'Connected',
+        HardwareConnectionStatus.error => 'Error',
+      };
+
+  String _connectionName(HardwareConnectionType type) => switch (type) {
+        HardwareConnectionType.thermocamBluetooth => 'ThermoCam_BLE',
+      };
 }
 
 class _StatusCard extends StatelessWidget {

@@ -1,17 +1,14 @@
 import 'dart:async';
-import 'dart:convert';
-
-import 'package:flutter/foundation.dart';
-import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 
-import '../../models/cc1101_diagnostic_sample.dart';
+import '../../models/detection_record.dart';
 import '../../models/scan_data.dart';
-import '../../services/esp32_http_service.dart';
-import '../../services/hardware_data_monitor.dart';
-import '../../services/thermal_simulator.dart';
+import '../../services/database_helper.dart';
+import '../../services/hardware_connection_service.dart';
 import '../../utils/thermal_interpolator.dart';
+import '../thermal/sop_dialog.dart';
 import '../thermal/thermal_heatmap64_view.dart';
 
 class HardwareMonitorView extends StatefulWidget {
@@ -22,137 +19,112 @@ class HardwareMonitorView extends StatefulWidget {
 }
 
 class _HardwareMonitorViewState extends State<HardwareMonitorView> {
-  static const _simulator = ThermalSimulator();
-  final _esp32Service = Esp32HttpService();
-  final _random = Random();
-  StreamSubscription<HardwareDataEvent>? _subscription;
-  StreamSubscription<ScanData>? _scanSubscription;
-  Timer? _simulationTimer;
-  ScanData? _latestScan;
-  double? _cc1101Rssi;
-  bool _isConnecting = false;
-  bool _isScanning = false;
-  bool _isSimulating = false;
-  String? _connectionError;
+  HardwareConnectionService? _service;
+  StreamSubscription<ScanData>? _riskSubscription;
+  bool _isSopOpen = false;
 
   @override
-  void initState() {
-    super.initState();
-    _subscription = HardwareDataMonitor.instance.events.listen(_onData);
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final service = HardwareConnectionScope.of(context);
+    if (identical(service, _service)) return;
+    _riskSubscription?.cancel();
+    _service = service;
+    _riskSubscription = service.riskEvents.listen(_showSopForScan);
   }
 
-  void _onData(HardwareDataEvent event) {
-    if (!mounted) return;
-    if (event.scan == null && event.cc1101Sample == null) return;
-    setState(() {
-      if (event.scan != null) _latestScan = event.scan;
-      final sample = event.cc1101Sample;
-      if (sample != null) _cc1101Rssi = sample.rssi;
+  void _showSopForScan(ScanData scan) {
+    if (_isSopOpen) return;
+    _isSopOpen = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) {
+        _isSopOpen = false;
+        return;
+      }
+      try {
+        final decision = await SopDialog.show(context);
+        if (decision != null) await _persistSopDecision(scan, decision);
+      } catch (error) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('處理 SOP 結果失敗：$error')),
+          );
+        }
+      } finally {
+        _isSopOpen = false;
+      }
     });
   }
 
-  @override
-  void dispose() {
-    _simulationTimer?.cancel();
-    _subscription?.cancel();
-    _scanSubscription?.cancel();
-    unawaited(_esp32Service.dispose());
-    super.dispose();
-  }
-
-  Future<void> _toggleScan() async {
-    if (_isConnecting) return;
-    if (_isScanning) {
-      _simulationTimer?.cancel();
-      _simulationTimer = null;
-      await _esp32Service.stop();
-      await _scanSubscription?.cancel();
-      _scanSubscription = null;
-      if (mounted) {
-        setState(() {
-          _isScanning = false;
-          _isSimulating = false;
-        });
-      }
+  Future<void> _persistSopDecision(
+    ScanData scan,
+    SopDecision decision,
+  ) async {
+    final position = await _getCurrentPosition();
+    if (!mounted) return;
+    if (position == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('定位服務不可用，無法寫入事件紀錄')),
+      );
       return;
     }
 
-    setState(() {
-      _isConnecting = true;
-      _isSimulating = false;
-    });
-    _scanSubscription = _esp32Service.scans.listen(
-      (_) {},
-      onError: (Object error) {
-        if (!mounted) return;
-        setState(() => _connectionError = error.toString());
-        unawaited(_startSimulator());
-      },
+    final result = scan.analyze();
+    final isDanger = decision == SopDecision.confirmedDanger;
+    await DatabaseHelper.instance.insertRecord(
+      DetectionRecord(
+        timestamp: DateTime.now().toUtc(),
+        maxDeltaT: result.deltaT,
+        maxRSSI: result.rssi,
+        latitude: position.latitude,
+        longitude: position.longitude,
+        statusColor: isDanger ? 'RED' : 'YELLOW',
+        userDecision: isDanger ? 'CONFIRMED_DANGER' : 'UNCERTAIN_WARNING',
+        adviceText: isDanger
+            ? '複檢異常：請立即檢查該位置並依現場安全程序處置。'
+            : '複檢正常（疑似誤判）：建議貼膠帶遮蔽可疑位置或拔除電源後再驗證。',
+      ),
     );
+  }
+
+  Future<Position?> _getCurrentPosition() async {
+    if (!await Geolocator.isLocationServiceEnabled()) return null;
+    var permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.denied ||
+        permission == LocationPermission.deniedForever) {
+      return null;
+    }
+    return Geolocator.getCurrentPosition();
+  }
+
+  Future<void> _connect(HardwareConnectionType type) async {
     try {
-      await _esp32Service.start();
-      if (!mounted) return;
-      setState(() {
-        _isConnecting = false;
-        _isScanning = true;
-        _isSimulating = false;
-        _connectionError = null;
-      });
+      await _service!.connect(
+        type,
+        fallbackToSimulator: true,
+      );
     } catch (error) {
       if (mounted) {
-        setState(() => _connectionError = error.toString());
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('連線失敗：$error')),
+        );
       }
-      await _startSimulator();
     }
   }
 
-  Future<void> _startSimulator() async {
-    if (_isSimulating || !mounted) return;
-    await _esp32Service.stop();
-    await _scanSubscription?.cancel();
-    _scanSubscription = null;
-    if (!mounted) return;
-    setState(() {
-      _isConnecting = false;
-      _isScanning = true;
-      _isSimulating = true;
-    });
-    _simulationTimer ??= Timer.periodic(
-      const Duration(milliseconds: 300),
-      (_) => _publishSimulatedData(),
-    );
-    _publishSimulatedData();
-  }
-
-  void _publishSimulatedData() {
-    final scan = _simulator.scan();
-    HardwareDataMonitor.instance.add(
-      source: '熱成像模擬資料',
-      rawText: jsonEncode({
-        'device_name': scan.deviceName,
-        'rssi': scan.rssi,
-        'thermal_grid': scan.thermalGrid,
-        'captured_at': scan.capturedAt,
-      }),
-      scan: scan,
-    );
-    final cc1101Rssi = -90 + _random.nextDouble() * 45;
-    final sample = Cc1101DiagnosticSample(
-      capturedAt: DateTime.now(),
-      rssi: cc1101Rssi,
-      lqi: null,
-      crcOk: null,
-      receivedPackets: null,
-      lostPackets: null,
-      per: null,
-      distanceMeters: null,
-      rawJson: {'rssi': cc1101Rssi, 'simulated': true},
-    );
-    HardwareDataMonitor.instance.add(
-      source: 'CC1101 模擬資料',
-      rawText: sample.toJsonLine(),
-      cc1101Sample: sample,
-    );
+  Future<void> _disconnect() async {
+    try {
+      await _service!.disconnect();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('中斷連線失敗：$error')),
+        );
+      }
+    }
   }
 
   List<List<double>> _interpolatedThermalGrid(ScanData scan) {
@@ -172,8 +144,19 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
   }
 
   @override
+  void dispose() {
+    _riskSubscription?.cancel();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
-    final scan = _latestScan;
+    final service = HardwareConnectionScope.of(context);
+    final scan = service.latestScan;
+    final cc1101Sample = service.latestCc1101Sample;
+    final activeConnection = service.activeConnection;
+    final isScanning = service.isScanning;
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Center(
@@ -182,6 +165,32 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              _ConnectionCard(
+                title: 'ThermoCam_BLE',
+                icon: Icons.bluetooth,
+                state: service.stateFor(
+                  HardwareConnectionType.thermocamBluetooth,
+                ),
+                canConnect: service.canConnect,
+                onConnect: () => _connect(
+                  HardwareConnectionType.thermocamBluetooth,
+                ),
+                onDisconnect:
+                    service.isSimulating ? service.stopSimulation : _disconnect,
+                isActive: activeConnection ==
+                    HardwareConnectionType.thermocamBluetooth,
+                isSimulating: service.isSimulating,
+              ),
+              for (final type in HardwareConnectionType.values)
+                if (service.stateFor(type).error != null) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '${_connectionName(type)}：${service.stateFor(type).error}',
+                    style:
+                        TextStyle(color: Theme.of(context).colorScheme.error),
+                  ),
+                ],
+              const SizedBox(height: 12),
               if (scan == null)
                 const _EmptyThermalCard()
               else
@@ -194,49 +203,13 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
               const SizedBox(height: 12),
               _DetectionStatusCard(result: scan?.analyze()),
               const SizedBox(height: 12),
-              FilledButton.icon(
-                onPressed: _isConnecting ? null : _toggleScan,
-                icon: _isConnecting
-                    ? const SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : Icon(_isScanning ? Icons.stop : Icons.play_arrow),
-                label: Text(
-                  _isConnecting
-                      ? '連線中...'
-                      : _isScanning
-                          ? '停止掃描'
-                          : '開始掃描',
-                ),
-              ),
-              if (_isScanning) ...[
+              if (isScanning) ...[
                 const SizedBox(height: 8),
                 Text(
-                  _isSimulating ? '模擬模式 · 未連接硬體' : 'ESP32 即時資料',
+                  service.isSimulating ? '模擬模式 · 未連接硬體' : 'ThermoCam_BLE 即時資料',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.labelMedium,
                 ),
-                if (_isSimulating && _connectionError != null) ...[
-                  const SizedBox(height: 8),
-                  Card(
-                    color: Theme.of(context).colorScheme.errorContainer,
-                    child: Padding(
-                      padding: const EdgeInsets.all(12),
-                      child: Text(
-                        kIsWeb
-                            ? 'Web 連線失敗：請讓電腦連上 AntiPinhole-ESP32，並從 HTTP 網址開啟 App；若 App 使用 HTTPS，瀏覽器可能禁止連線到 http://192.168.4.1/data。\n${_connectionError!}'
-                            : '無法連線 http://192.168.4.1/data：請確認手機已連上 AntiPinhole-ESP32。\n${_connectionError!}',
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                          color:
-                              Theme.of(context).colorScheme.onErrorContainer,
-                        ),
-                        textAlign: TextAlign.center,
-                      ),
-                    ),
-                  ),
-                ],
               ],
               const SizedBox(height: 12),
               Row(
@@ -244,7 +217,7 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
                   Expanded(
                     child: _SignalCard(
                       icon: Icons.sensors_outlined,
-                      label: 'ESP32 RSSI',
+                      label: 'ThermoCam RSSI',
                       value: _formatRssi(scan?.rssi),
                     ),
                   ),
@@ -253,13 +226,99 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
                     child: _SignalCard(
                       icon: Icons.wifi_tethering_outlined,
                       label: 'CC1101 RSSI',
-                      value: _formatRssi(_cc1101Rssi),
+                      value: _formatRssi(cc1101Sample?.rssi),
                     ),
                   ),
                 ],
               ),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+String _connectionName(HardwareConnectionType type) => switch (type) {
+      HardwareConnectionType.thermocamBluetooth => 'ThermoCam_BLE',
+    };
+
+class _ConnectionCard extends StatelessWidget {
+  const _ConnectionCard({
+    required this.title,
+    required this.icon,
+    required this.state,
+    required this.canConnect,
+    required this.onConnect,
+    required this.onDisconnect,
+    required this.isActive,
+    required this.isSimulating,
+  });
+
+  final String title;
+  final IconData icon;
+  final HardwareConnectionState state;
+  final bool canConnect;
+  final VoidCallback onConnect;
+  final VoidCallback onDisconnect;
+  final bool isActive;
+  final bool isSimulating;
+
+  @override
+  Widget build(BuildContext context) {
+    final isConnecting = state.status == HardwareConnectionStatus.connecting;
+    final isConnected =
+        isActive && state.status == HardwareConnectionStatus.connected;
+    final status = isSimulating
+        ? '模擬掃描中'
+        : switch (state.status) {
+            HardwareConnectionStatus.disconnected => 'Disconnected',
+            HardwareConnectionStatus.connecting => 'Connecting',
+            HardwareConnectionStatus.connected => 'Connected',
+            HardwareConnectionStatus.error => 'Error',
+          };
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Wrap(
+          alignment: WrapAlignment.spaceBetween,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 12,
+          runSpacing: 8,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon),
+                const SizedBox(width: 8),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(title, style: Theme.of(context).textTheme.titleSmall),
+                    Text(status),
+                  ],
+                ),
+              ],
+            ),
+            isConnected || isSimulating
+                ? OutlinedButton.icon(
+                    onPressed: onDisconnect,
+                    icon: const Icon(Icons.link_off),
+                    label: Text(isSimulating ? '停止模擬' : '斷線'),
+                  )
+                : FilledButton.icon(
+                    onPressed: canConnect && !isConnecting ? onConnect : null,
+                    icon: isConnecting
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : Icon(icon),
+                    label: Text(isConnecting ? '連線中...' : '連線'),
+                  ),
+          ],
         ),
       ),
     );

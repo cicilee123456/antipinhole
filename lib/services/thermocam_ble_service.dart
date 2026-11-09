@@ -184,17 +184,27 @@ class ThermoCamBleService {
     }
   }
 
-  String _toHex(List<int> bytes) => bytes
-      .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
-      .join(' ');
+  String _toHex(List<int> bytes) =>
+      bytes.map((byte) => byte.toRadixString(16).padLeft(2, '0')).join(' ');
+
+  Future<void> disconnect() async {
+    await _valueSubscription?.cancel();
+    _valueSubscription = null;
+    await _scanSubscription?.cancel();
+    _scanSubscription = null;
+    await _webValueSubscription?.cancel();
+    _webValueSubscription = null;
+    await _webCharacteristic?.stopNotifications();
+    _webCharacteristic = null;
+    _webDevice?.disconnect();
+    _webDevice = null;
+    await _device?.disconnect();
+    _device = null;
+    _characteristic = null;
+  }
 
   Future<void> dispose() async {
-    await _valueSubscription?.cancel();
-    await _scanSubscription?.cancel();
-    await _webValueSubscription?.cancel();
-    await _webCharacteristic?.stopNotifications();
-    _webDevice?.disconnect();
-    await _device?.disconnect();
+    await disconnect();
     await _scanController.close();
   }
 }
