@@ -726,6 +726,64 @@ test/widget_test.dart 使用不存在的 MyApp
 
 此設計把「硬體資料如何進入應用程式」與「各頁如何呈現資料」分開：硬體監控頁負責操作，其他頁面訂閱及呈現，不再以各自的 Timer 或本地布林值作為連線狀態來源。
 
+#### 關鍵程式：根層建立並提供共用服務
+
+位置：`lib/main.dart`
+
+```dart
+class _AntiPinholeAppState extends State<AntiPinholeApp> {
+  final _hardwareService = HardwareConnectionService();
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      builder: (context, child) => HardwareConnectionScope(
+        service: _hardwareService,
+        child: child ?? const SizedBox.shrink(),
+      ),
+      home: const HomePage(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _hardwareService.dispose();
+    super.dispose();
+  }
+}
+```
+
+`HardwareConnectionService` 在根 Widget 建立，因此頁面切換不會重建另一個連線服務。`HardwareConnectionScope` 是 `InheritedNotifier`，除了提供服務，也會在服務 `notifyListeners()` 時通知依賴它的頁面重繪。根 Widget 結束時再釋放服務，避免 BLE 訂閱或 Timer 遺留。
+
+#### 關鍵程式：接收資料、更新快照並廣播
+
+位置：`lib/services/hardware_connection_service.dart`
+
+```dart
+HardwareConnectionService({
+  ThermoCamBleService? bleService,
+  this.sopCooldown = const Duration(seconds: 20),
+}) : _bleService = bleService ?? ThermoCamBleService() {
+  _dataSubscription =
+      HardwareDataMonitor.instance.events.listen(_handleDataEvent);
+}
+
+void _handleDataEvent(HardwareDataEvent event) {
+  if (_isClosed) return;
+  if (event.scan != null) {
+    _latestScan = event.scan;
+    _checkRisk(event.scan!);
+  }
+  if (event.cc1101Sample != null) {
+    _latestCc1101Sample = event.cc1101Sample;
+  }
+  _eventsController.add(event);
+  notifyListeners();
+}
+```
+
+建構時服務只訂閱一次全域 `HardwareDataMonitor`。收到事件後，先更新最新掃描／CC1101 快照，再將事件送到服務自己的廣播 Stream，最後通知依賴服務的 Widget 重繪。快照供頁面進入時立即讀取，Stream 則供需要逐筆處理事件的頁面訂閱。
+
 ### 2.2 單一 ThermoCam_BLE 連線
 
 1. `ThermoCamBleService` 負責實際 BLE 連線工作：掃描指定裝置 `ThermoCam_BLE`、連線、探索服務與特徵值，並訂閱通知。
@@ -736,6 +794,59 @@ test/widget_test.dart 使用不存在的 MyApp
 
 Wi-Fi 不再作為本次整合流程的連線方式，也不在硬體監控頁提供 Wi-Fi 連線控制。舊 `Esp32HttpService` 原始服務檔仍留在專案中，待確認無其他用途後再另行清理。
 
+#### 關鍵程式：連線狀態與錯誤處理
+
+位置：`lib/services/hardware_connection_service.dart`
+
+```dart
+Future<void> connect(
+  HardwareConnectionType type, {
+  bool fallbackToSimulator = false,
+}) async {
+  if (_isClosed) throw StateError('硬體連線服務已關閉');
+  if (_activeConnection == type &&
+      stateFor(type).status == HardwareConnectionStatus.connected) {
+    return;
+  }
+  if (!canConnect) {
+    throw StateError('請先中斷目前的連線或停止模擬掃描');
+  }
+
+  _activeConnection = type;
+  _setState(
+      type,
+      const HardwareConnectionState(
+        status: HardwareConnectionStatus.connecting,
+      ));
+  try {
+    await _bleService.connect();
+
+    if (_isClosed) return;
+    _setState(
+        type,
+        const HardwareConnectionState(
+          status: HardwareConnectionStatus.connected,
+        ));
+  } catch (error) {
+    try {
+      await _releaseConnection(type);
+    } catch (cleanupError) {
+      if (!_isClosed) _setConnectionError(type, cleanupError);
+      rethrow;
+    }
+    if (_isClosed) return;
+    _setConnectionError(type, error);
+    if (fallbackToSimulator) {
+      _startSimulator();
+      return;
+    }
+    rethrow;
+  }
+}
+```
+
+連線狀態由服務更新，而非由按鈕的區域狀態推測。開始連線先設為 `connecting`，完成後設為 `connected`；連線例外時先嘗試釋放連線，再保留錯誤狀態。硬體監控頁可選擇啟用模擬 fallback，但連線失敗仍會被服務記錄，不會偽裝成 BLE 已連線。
+
 ## 三、頁面調整
 
 ### 3.1 硬體監控頁：統一操作入口
@@ -744,9 +855,39 @@ Wi-Fi 不再作為本次整合流程的連線方式，也不在硬體監控頁�
 
 頁面繼續呈現共用即時掃描結果，包括熱成像熱圖、風險判定、ThermoCam RSSI，以及服務收到的 CC1101 RSSI。移除 Wi-Fi 與 CC1101 藍牙等額外連線入口，避免將同一裝置的整合頁做成多個彼此獨立的連線控制區。
 
+連線按鈕最終呼叫共用服務，而不是在 Widget 內直接建立 BLE client：
+
+```dart
+Future<void> _connect(HardwareConnectionType type) async {
+  try {
+    await _service!.connect(
+      type,
+      fallbackToSimulator: true,
+    );
+  } catch (error) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('連線失敗：$error')),
+      );
+    }
+  }
+}
+```
+
+UI 將錯誤明確呈現給使用者；模擬 fallback 的選擇也明確傳給服務。斷線操作同樣呼叫 `_service!.disconnect()`，不在頁面自行操作 BLE 特徵值或訂閱生命週期。
+
 ### 3.2 熱成像頁：共用資料檢視
 
 `ThermalScanView` 改為 Stateless 檢視頁，從 `HardwareConnectionScope` 取得服務的最新掃描資料及連線狀態，顯示連線摘要、風險狀態、熱圖、ΔT 與 RSSI。頁面不再自行連線或維護掃描 Timer，並明確提示使用者回到硬體監控頁執行 BLE 連線與掃描操作。
+
+```dart
+final service = HardwareConnectionScope.of(context);
+final scan = service.latestScan;
+final result = scan?.analyze();
+final activeConnection = service.activeConnection;
+```
+
+這段程式直接取用共用服務的快照與連線狀態；實際 Widget 依 `result` 是否為空顯示等待狀態或熱圖與量測指標。因 scope 監聽同一個服務，資料更新後頁面會重新 build，並讀取最新快照。
 
 ### 3.3 CC1101 診斷頁：保留檢視，不另建連線
 
@@ -758,12 +899,59 @@ Wi-Fi 不再作為本次整合流程的連線方式，也不在硬體監控頁�
 
 高風險門檻集中在 `HardwareConnectionService` 的掃描資料處理流程：每筆掃描資料使用 `ScanData.analyze()` 取得 ΔT 與 RSSI，只有同時符合 **ΔT ≥ 6.0 °C**、**RSSI ≥ -50 dBm** 才符合 SOP 觸發條件。符合條件時服務發布風險事件；各頁不重複實作風險判定。
 
+```dart
+void _checkRisk(ScanData scan) {
+  final result = scan.analyze();
+  final highRisk = result.deltaT >= 6.0 && result.rssi >= -50.0;
+  if (!highRisk) return;
+
+  final lastRiskAt = _lastRiskAt;
+  if (lastRiskAt != null &&
+      DateTime.now().difference(lastRiskAt) < sopCooldown) {
+    return;
+  }
+  _lastRiskAt = DateTime.now();
+  _riskController.add(scan);
+}
+```
+
+風險事件只從服務的 Stream 發出；冷卻時間預設 20 秒。冷卻期間的高風險樣本不會重複通知 UI，但每筆樣本仍會更新最新掃描快照並正常送到資料事件流。
+
 ### 4.2 防重入與冷卻
 
 1. 共用服務預設設定 20 秒 SOP 冷卻時間，以最近一次已發布的風險時間判斷是否允許再次發布。
 2. 冷卻期間到達的高風險資料不會立即再發出風險事件，避免資料頻率高時連續開啟 Dialog。
 3. 若高風險持續，冷卻時間結束後再收到符合門檻的新掃描資料，即可重新發布事件；不需要頁面自行重置風險旗標。
 4. 硬體監控頁訂閱風險事件，使用 `_isSopOpen` 防止同一時間重入；以 post-frame callback 開啟 `SopDialog.show(context)`，並檢查 Widget 是否仍 mounted。Dialog 完成或發生例外時會重置旗標。
+
+對應 UI 端的防重入入口如下：
+
+```dart
+void _showSopForScan(ScanData scan) {
+  if (_isSopOpen) return;
+  _isSopOpen = true;
+  WidgetsBinding.instance.addPostFrameCallback((_) async {
+    if (!mounted) {
+      _isSopOpen = false;
+      return;
+    }
+    try {
+      final decision = await SopDialog.show(context);
+      if (decision != null) await _persistSopDecision(scan, decision);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('處理 SOP 結果失敗：$error')),
+        );
+      }
+    } finally {
+      _isSopOpen = false;
+    }
+  });
+}
+```
+
+`_isSopOpen` 與服務層冷卻用途不同：服務層限制風險事件發布頻率；Widget 旗標則防止同一個畫面同時開多個 Dialog。`addPostFrameCallback` 避免在資料通知／build 尚未完成時直接操作 Navigator，`mounted` 檢查則避免頁面已離開仍使用失效的 `context`。
 
 ### 4.3 使用者決策與紀錄
 
