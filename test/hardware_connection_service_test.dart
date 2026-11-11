@@ -3,7 +3,7 @@ import 'dart:async';
 import 'package:anti_pinhole/models/scan_data.dart';
 import 'package:anti_pinhole/services/hardware_connection_service.dart';
 import 'package:anti_pinhole/services/hardware_data_monitor.dart';
-import 'package:anti_pinhole/services/thermocam_ble_service.dart';
+import 'package:anti_pinhole/services/esp32_ble_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -13,25 +13,29 @@ void main() {
     final service = HardwareConnectionService(bleService: bleService);
 
     final connectFuture = service.connect(
-      HardwareConnectionType.thermocamBluetooth,
+      HardwareConnectionType.esp32Bluetooth,
     );
     expect(
-      service.stateFor(HardwareConnectionType.thermocamBluetooth).status,
+      service.stateFor(HardwareConnectionType.esp32Bluetooth).status,
       HardwareConnectionStatus.connecting,
     );
 
     connectCompleter.complete();
     await connectFuture;
     expect(
-      service.stateFor(HardwareConnectionType.thermocamBluetooth).status,
+      service.stateFor(HardwareConnectionType.esp32Bluetooth).status,
       HardwareConnectionStatus.connected,
     );
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+    expect(service.esp32Rssi, -48);
+    expect(service.esp32RssiError, isNull);
 
     await service.disconnect();
     expect(
-      service.stateFor(HardwareConnectionType.thermocamBluetooth).status,
+      service.stateFor(HardwareConnectionType.esp32Bluetooth).status,
       HardwareConnectionStatus.disconnected,
     );
+    expect(service.esp32Rssi, isNull);
     service.dispose();
   });
 
@@ -42,10 +46,10 @@ void main() {
     );
 
     await expectLater(
-      service.connect(HardwareConnectionType.thermocamBluetooth),
+      service.connect(HardwareConnectionType.esp32Bluetooth),
       throwsStateError,
     );
-    final state = service.stateFor(HardwareConnectionType.thermocamBluetooth);
+    final state = service.stateFor(HardwareConnectionType.esp32Bluetooth);
     expect(state.status, HardwareConnectionStatus.error);
     expect(state.error, contains('BLE unavailable'));
     expect(service.activeConnection, isNull);
@@ -124,7 +128,7 @@ ScanData _scan(
   );
 }
 
-class _ControlledBleService extends ThermoCamBleService {
+class _ControlledBleService extends Esp32BleService {
   _ControlledBleService(this.connectCompleter);
 
   final Completer<void> connectCompleter;
@@ -136,10 +140,13 @@ class _ControlledBleService extends ThermoCamBleService {
   Future<void> disconnect() async {}
 
   @override
+  Future<int> readRssi() async => -48;
+
+  @override
   Future<void> dispose() async {}
 }
 
-class _FailingBleService extends ThermoCamBleService {
+class _FailingBleService extends Esp32BleService {
   @override
   Future<void> connect() async {
     throw StateError('BLE unavailable');

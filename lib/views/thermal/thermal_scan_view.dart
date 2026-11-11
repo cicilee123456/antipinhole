@@ -76,7 +76,7 @@ class ThermalScanView extends StatelessWidget {
               ],
               const SizedBox(height: 12),
               const Text(
-                'ThermoCam_BLE 連線與掃描請由「硬體監控」頁面操作；此頁顯示共用即時資料。',
+                'CC1101_BLE 連線請由「硬體監控」頁面操作；此頁顯示共用熱成像資料。',
                 textAlign: TextAlign.center,
               ),
             ],
@@ -145,7 +145,7 @@ class _ConnectionSummary extends StatelessWidget {
       };
 
   String _connectionName(HardwareConnectionType type) => switch (type) {
-        HardwareConnectionType.thermocamBluetooth => 'ThermoCam_BLE',
+          HardwareConnectionType.esp32Bluetooth => 'CC1101_BLE',
       };
 }
 

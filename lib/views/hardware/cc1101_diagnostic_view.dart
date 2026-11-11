@@ -311,7 +311,7 @@ String _formatPackets(Cc1101DiagnosticSample? sample) {
 }
 
 String _connectionName(HardwareConnectionType type) => switch (type) {
-      HardwareConnectionType.thermocamBluetooth => 'ThermoCam_BLE',
+      HardwareConnectionType.esp32Bluetooth => 'CC1101_BLE',
     };
 
 String _statusLabel(HardwareConnectionStatus status) => switch (status) {

@@ -7,9 +7,9 @@ import '../models/cc1101_diagnostic_sample.dart';
 import '../models/scan_data.dart';
 import 'hardware_data_monitor.dart';
 import 'thermal_simulator.dart';
-import 'thermocam_ble_service.dart';
+import 'esp32_ble_service.dart';
 
-enum HardwareConnectionType { thermocamBluetooth }
+enum HardwareConnectionType { esp32Bluetooth }
 
 enum HardwareConnectionStatus {
   disconnected,
@@ -30,9 +30,9 @@ class HardwareConnectionState {
 
 class HardwareConnectionService extends ChangeNotifier {
   HardwareConnectionService({
-    ThermoCamBleService? bleService,
+    Esp32BleService? bleService,
     this.sopCooldown = const Duration(seconds: 20),
-  }) : _bleService = bleService ?? ThermoCamBleService() {
+  }) : _bleService = bleService ?? Esp32BleService() {
     _dataSubscription =
         HardwareDataMonitor.instance.events.listen(_handleDataEvent);
   }
@@ -40,26 +40,34 @@ class HardwareConnectionService extends ChangeNotifier {
   static const _simulator = ThermalSimulator();
 
   final Duration sopCooldown;
-  final ThermoCamBleService _bleService;
+  final Esp32BleService _bleService;
   final _random = Random();
   final _states = {
-    HardwareConnectionType.thermocamBluetooth: const HardwareConnectionState(),
+    HardwareConnectionType.esp32Bluetooth: const HardwareConnectionState(),
   };
   final _eventsController = StreamController<HardwareDataEvent>.broadcast();
   final _riskController = StreamController<ScanData>.broadcast();
 
   StreamSubscription<HardwareDataEvent>? _dataSubscription;
   Timer? _simulationTimer;
+  Timer? _rssiTimer;
   HardwareConnectionType? _activeConnection;
   ScanData? _latestScan;
   Cc1101DiagnosticSample? _latestCc1101Sample;
+  int? _esp32Rssi;
+  String? _esp32RssiError;
   DateTime? _lastRiskAt;
   bool _isClosed = false;
+  bool _isReadingRssi = false;
+  int _rssiGeneration = 0;
 
   Stream<HardwareDataEvent> get events => _eventsController.stream;
   Stream<ScanData> get riskEvents => _riskController.stream;
   ScanData? get latestScan => _latestScan;
   Cc1101DiagnosticSample? get latestCc1101Sample => _latestCc1101Sample;
+  int? get esp32Rssi => _esp32Rssi;
+  String? get esp32RssiError => _esp32RssiError;
+  bool get supportsBleRssi => _bleService.supportsRssi;
   HardwareConnectionType? get activeConnection => _activeConnection;
   bool get isSimulating => _simulationTimer != null;
 
@@ -110,6 +118,7 @@ class HardwareConnectionService extends ChangeNotifier {
           const HardwareConnectionState(
             status: HardwareConnectionStatus.connected,
           ));
+      _startRssiMonitoring();
     } catch (error) {
       try {
         await _releaseConnection(type);
@@ -221,8 +230,52 @@ class HardwareConnectionService extends ChangeNotifier {
   }
 
   Future<void> _releaseConnection(HardwareConnectionType type) async {
+    _stopRssiMonitoring();
     await _bleService.disconnect();
     _activeConnection = null;
+  }
+
+  void _startRssiMonitoring() {
+    _stopRssiMonitoring();
+    if (!supportsBleRssi) return;
+    unawaited(_refreshEsp32Rssi());
+    _rssiTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_refreshEsp32Rssi()),
+    );
+  }
+
+  void _stopRssiMonitoring() {
+    _rssiGeneration++;
+    _rssiTimer?.cancel();
+    _rssiTimer = null;
+    _esp32Rssi = null;
+    _esp32RssiError = null;
+  }
+
+  Future<void> _refreshEsp32Rssi() async {
+    if (_isClosed || _isReadingRssi || _activeConnection == null) return;
+    final generation = _rssiGeneration;
+    _isReadingRssi = true;
+    try {
+      final rssi = await _bleService.readRssi();
+      if (!_isClosed &&
+          generation == _rssiGeneration &&
+          _activeConnection != null) {
+        _esp32Rssi = rssi;
+        _esp32RssiError = null;
+      }
+    } catch (error) {
+      if (!_isClosed &&
+          generation == _rssiGeneration &&
+          _activeConnection != null) {
+        _esp32Rssi = null;
+        _esp32RssiError = error.toString();
+      }
+    } finally {
+      _isReadingRssi = false;
+      if (!_isClosed) notifyListeners();
+    }
   }
 
   void _setConnectionError(HardwareConnectionType type, Object error) {
@@ -245,6 +298,7 @@ class HardwareConnectionService extends ChangeNotifier {
   void dispose() {
     _isClosed = true;
     _simulationTimer?.cancel();
+    _rssiTimer?.cancel();
     unawaited(_dataSubscription?.cancel());
     unawaited(_eventsController.close());
     unawaited(_riskController.close());

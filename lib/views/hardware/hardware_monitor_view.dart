@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 
+import '../../models/cc1101_diagnostic_sample.dart';
 import '../../models/detection_record.dart';
 import '../../models/scan_data.dart';
 import '../../services/database_helper.dart';
@@ -127,9 +129,9 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
     }
   }
 
-  List<List<double>> _interpolatedThermalGrid(ScanData scan) {
+  List<List<double>> _interpolatedThermalGrid(List<double> thermalGrid) {
     final values = ThermalInterpolator.interpolate8x8(
-      scan.thermalGrid,
+      thermalGrid,
       targetSize: ThermalHeatmap64View.gridSize,
     );
     return List<List<double>>.generate(
@@ -154,8 +156,13 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
     final service = HardwareConnectionScope.of(context);
     final scan = service.latestScan;
     final cc1101Sample = service.latestCc1101Sample;
+    final thermalGrid = scan?.thermalGrid ?? cc1101Sample?.thermalPixels;
     final activeConnection = service.activeConnection;
     final isScanning = service.isScanning;
+    final isEsp32Connected =
+        activeConnection == HardwareConnectionType.esp32Bluetooth &&
+            service.stateFor(HardwareConnectionType.esp32Bluetooth).status ==
+                HardwareConnectionStatus.connected;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
@@ -166,19 +173,19 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _ConnectionCard(
-                title: 'ThermoCam_BLE',
+                title: 'CC1101_BLE',
                 icon: Icons.bluetooth,
                 state: service.stateFor(
-                  HardwareConnectionType.thermocamBluetooth,
+                  HardwareConnectionType.esp32Bluetooth,
                 ),
                 canConnect: service.canConnect,
                 onConnect: () => _connect(
-                  HardwareConnectionType.thermocamBluetooth,
+                  HardwareConnectionType.esp32Bluetooth,
                 ),
                 onDisconnect:
                     service.isSimulating ? service.stopSimulation : _disconnect,
-                isActive: activeConnection ==
-                    HardwareConnectionType.thermocamBluetooth,
+                isActive:
+                    activeConnection == HardwareConnectionType.esp32Bluetooth,
                 isSimulating: service.isSimulating,
               ),
               for (final type in HardwareConnectionType.values)
@@ -191,22 +198,30 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
                   ),
                 ],
               const SizedBox(height: 12),
-              if (scan == null)
+              if (thermalGrid == null)
                 const _EmptyThermalCard()
               else
                 ThermalHeatmap64View(
-                  temperatures: _interpolatedThermalGrid(scan),
+                  temperatures: _interpolatedThermalGrid(thermalGrid),
                   minTemp: 20,
                   maxTemp: 40,
                   warningThreshold: 35,
                 ),
+              if (thermalGrid == null && isEsp32Connected) ...[
+                const SizedBox(height: 8),
+                const Text(
+                  '目前韌體只傳送 CC1101 診斷資料，尚未傳送 64 格熱像資料；'
+                  '熱圖與溫差風險判定需由韌體另外提供熱像資料。',
+                  textAlign: TextAlign.center,
+                ),
+              ],
               const SizedBox(height: 12),
               _DetectionStatusCard(result: scan?.analyze()),
               const SizedBox(height: 12),
               if (isScanning) ...[
                 const SizedBox(height: 8),
                 Text(
-                  service.isSimulating ? '模擬模式 · 未連接硬體' : 'ThermoCam_BLE 即時資料',
+                  service.isSimulating ? '模擬模式 · 未連接硬體' : 'CC1101_BLE 即時資料',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.labelMedium,
                 ),
@@ -216,20 +231,40 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
                 children: [
                   Expanded(
                     child: _SignalCard(
-                      icon: Icons.sensors_outlined,
-                      label: 'ThermoCam RSSI',
-                      value: _formatRssi(scan?.rssi),
+                      icon: Icons.bluetooth,
+                      label: 'ESP32 BLE RSSI',
+                      value: service.supportsBleRssi
+                          ? _formatRssi(service.esp32Rssi?.toDouble())
+                          : '此平台不支援',
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: _SignalCard(
-                      icon: Icons.wifi_tethering_outlined,
-                      label: 'CC1101 RSSI',
-                      value: _formatRssi(cc1101Sample?.rssi),
+                      icon: Icons.sensors_outlined,
+                      label: '熱像 RSSI',
+                      value: _formatRssi(scan?.rssi),
                     ),
                   ),
                 ],
+              ),
+              const SizedBox(height: 12),
+              _SignalCard(
+                icon: Icons.wifi_tethering_outlined,
+                label: 'CC1101 RSSI',
+                value: _formatRssi(cc1101Sample?.rssi),
+              ),
+              if (service.esp32RssiError != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  'ESP32 BLE RSSI 讀取失敗：${service.esp32RssiError}',
+                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                ),
+              ],
+              const SizedBox(height: 12),
+              _SensorDataCard(
+                sample: cc1101Sample,
+                isSimulating: service.isSimulating,
               ),
             ],
           ),
@@ -240,7 +275,7 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
 }
 
 String _connectionName(HardwareConnectionType type) => switch (type) {
-      HardwareConnectionType.thermocamBluetooth => 'ThermoCam_BLE',
+      HardwareConnectionType.esp32Bluetooth => 'CC1101_BLE',
     };
 
 class _ConnectionCard extends StatelessWidget {
@@ -425,5 +460,127 @@ class _SignalCard extends StatelessWidget {
   }
 }
 
+class _SensorDataCard extends StatelessWidget {
+  const _SensorDataCard({
+    required this.sample,
+    required this.isSimulating,
+  });
+
+  final Cc1101DiagnosticSample? sample;
+  final bool isSimulating;
+
+  @override
+  Widget build(BuildContext context) {
+    final thermalPixels = sample?.thermalPixels;
+    final thermalSummary = thermalPixels == null
+        ? '韌體尚未透過 BLE 上報'
+        : _thermalSummary(thermalPixels);
+    final irStatus = switch (sample?.irDetected) {
+      true => '偵測到紅外線${_irDetails(sample!)}',
+      false => '目前未偵測到紅外線${_irDetails(sample!)}',
+      null => '韌體尚未透過 BLE 上報',
+    };
+    final cc1101Status = sample == null
+        ? '等待 BLE 診斷資料'
+        : '${isSimulating ? '模擬資料 · ' : ''}'
+            'RSSI ${_formatRssi(sample!.rssi)} · LQI ${sample!.lqi?.toStringAsFixed(0) ?? '--'} · '
+            'CRC ${_formatCrc(sample!.crcOk)} · PER ${_formatPercent(sample!.per)} · '
+            '封包 ${sample!.receivedPackets ?? '--'} 收 / ${sample!.lostPackets ?? '--'} 失';
+
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('感測器資料', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 12),
+            _SensorStatusRow(
+              icon: Icons.device_thermostat,
+              title: 'AMG8833 熱像',
+              value: thermalSummary,
+              isAvailable: thermalPixels != null,
+            ),
+            const Divider(height: 20),
+            _SensorStatusRow(
+              icon: Icons.sensors,
+              title: 'CC1101 射頻',
+              value: cc1101Status,
+              isAvailable: sample != null && !isSimulating,
+            ),
+            const Divider(height: 20),
+            _SensorStatusRow(
+              icon: Icons.wb_incandescent_outlined,
+              title: 'VS1838B 紅外線',
+              value: irStatus,
+              isAvailable: sample?.irDetected != null,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  String _irDetails(Cc1101DiagnosticSample value) {
+    final parts = [
+      if (value.irProtocol != null) '協定 ${value.irProtocol}',
+      if (value.irAddress != null) '位址 ${value.irAddress}',
+      if (value.irCommand != null) '指令 ${value.irCommand}',
+    ];
+    return parts.isEmpty ? '' : '（${parts.join(' · ')}）';
+  }
+
+  String _thermalSummary(List<double> values) {
+    final minimum = values.reduce(math.min);
+    final maximum = values.reduce(math.max);
+    return '64 格 · ${minimum.toStringAsFixed(1)}–'
+        '${maximum.toStringAsFixed(1)} °C · ΔT ${(maximum - minimum).toStringAsFixed(1)} °C';
+  }
+}
+
+class _SensorStatusRow extends StatelessWidget {
+  const _SensorStatusRow({
+    required this.icon,
+    required this.title,
+    required this.value,
+    required this.isAvailable,
+  });
+
+  final IconData icon;
+  final String title;
+  final String value;
+  final bool isAvailable;
+
+  @override
+  Widget build(BuildContext context) {
+    final color = isAvailable
+        ? Theme.of(context).colorScheme.primary
+        : Theme.of(context).colorScheme.outline;
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, color: color),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(title, style: Theme.of(context).textTheme.labelLarge),
+              const SizedBox(height: 4),
+              Text(value, style: Theme.of(context).textTheme.bodyMedium),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 String _formatRssi(double? value) =>
     value == null ? '-- dBm' : '${value.toStringAsFixed(1)} dBm';
+
+String _formatCrc(bool? value) =>
+    value == null ? '--' : (value ? 'OK' : 'FAIL');
+
+String _formatPercent(double? value) =>
+    value == null ? '--' : '${(value * 100).toStringAsFixed(2)}%';

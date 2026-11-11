@@ -44,4 +44,15 @@ void main() {
     expect(sample.per, isNull);
     expect(sample.distanceMeters, isNull);
   });
+
+  test('rejects malformed AMG8833 pixel arrays', () {
+    expect(
+      () => Cc1101DiagnosticSample.fromJson({
+        'amg8833': {
+          'pixels': [21, 22]
+        },
+      }),
+      throwsFormatException,
+    );
+  });
 }

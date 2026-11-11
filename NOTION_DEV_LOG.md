@@ -989,3 +989,33 @@ SOP Dialog 提供「複檢異常」及「複檢正常（疑似誤判）」兩種
 ## 八、今日結論
 
 完成由硬體監控頁統一操作 ThermoCam_BLE 的架構調整，並將服務生命週期放到應用程式根層。熱成像與 CC1101 頁透過同一服務讀取連線狀態及共享資料，降低各頁狀態分歧。高風險判定、事件冷卻與 Dialog 防重入各由明確層級負責，並以完整測試驗證單頁操作、跨頁同步、連線錯誤與 SOP 觸發流程。
+
+---
+
+# 2026-11-11 工作日誌｜配合 ESP32-C5 CC1101_BLE 韌體修正 App 連線
+
+## 一、問題與根因
+
+依照提供的 ESP32-C5 Arduino 韌體比對 App BLE 設定，確認 App 先前仍搜尋 `ThermoCam_BLE`，並使用另一組 ThermoCam 服務／特徵 UUID；韌體實際廣播名稱為 `CC1101_BLE`，使用 Nordic UART 風格 UUID。名稱與 GATT UUID 不一致時，App 無法找到目標裝置或無法取得通知特徵值，因此連線流程會失敗。
+
+連線後的資料格式也不同：韌體每秒傳送 CC1101 診斷 JSON，並在收到 RF 封包時更新通知；JSON 欄位包含 `captured_at`、`rssi`、`lqi`、`crc_ok`、`received_packets`、`lost_packets` 和 `per`，不是 App 原本期待的熱像陣列格式。
+
+## 二、App 端修改
+
+1. 將 BLE 用戶端服務調整為 `Esp32BleService`，並把裝置名稱及 Service／Characteristic UUID 對齊韌體設定。
+2. Android／原生掃描改為比對裝置平台名稱及廣播名稱，避免平台裝置名稱欄位未提供時漏掉廣播名稱；啟動掃描前檢查 BLE 支援與藍牙介面狀態。
+3. 連線後探索韌體宣告的 GATT Service 與 notify Characteristic，啟用通知，並保留 MTU 協商，以配合 JSON 通知封包大小。
+4. 新增 BLE JSON 通知緩衝／組裝，支援一筆 JSON 分散在多個通知片段的情況；成功解析後轉為 `Cc1101DiagnosticSample`，發布到共用 `HardwareDataMonitor`，供硬體監控與 CC1101 診斷頁使用。
+5. 硬體監控的連線名稱與共用連線類型同步改為 ESP32 BLE；連線成功但尚未收到熱像資料時，頁面會說明目前韌體只傳送 CC1101 診斷資料。
+
+## 三、韌體資料範圍
+
+目前韌體雖然以 `amg.readPixels(thermalPixels)` 讀取 AMG8833，但 `notifyDiagnosticData()` 建立的 JSON 沒有包含 `thermalPixels`。因此 App 可以連線並顯示 CC1101 RSSI／LQI／CRC／封包統計，但這份韌體尚不能提供熱圖或 ΔT；硬體監控頁的熱圖與依熱像資料觸發的 SOP 仍需韌體另外傳送 64 格熱像資料後才能工作。
+
+## 四、驗證結果
+
+- 新增測試確認 App 使用的 BLE 名稱與 UUID 和韌體完全一致。
+- 新增測試以韌體格式 JSON 分段送入通知解析器，確認組裝後發布為 CC1101 診斷樣本，而非熱像掃描資料。
+- 完整 `flutter test`：21 項測試全部通過。
+- 修改範圍的 `flutter analyze`：無問題。
+- `git diff --check`：通過。
