@@ -10,6 +10,7 @@ class HardwareDataEvent {
     required this.rawText,
     this.scan,
     this.cc1101Sample,
+    this.wifiNetworks,
     this.error,
   });
 
@@ -18,9 +19,12 @@ class HardwareDataEvent {
   final String rawText;
   final ScanData? scan;
   final Cc1101DiagnosticSample? cc1101Sample;
+  final List<WifiAccessPoint>? wifiNetworks;
   final String? error;
 
-  bool get isParsed => (scan != null || cc1101Sample != null) && error == null;
+  bool get isParsed =>
+      (scan != null || cc1101Sample != null || wifiNetworks != null) &&
+      error == null;
 }
 
 class HardwareDataMonitor {
@@ -36,6 +40,7 @@ class HardwareDataMonitor {
     required String rawText,
     ScanData? scan,
     Cc1101DiagnosticSample? cc1101Sample,
+    List<WifiAccessPoint>? wifiNetworks,
     String? error,
   }) {
     if (!_controller.isClosed) {
@@ -46,6 +51,7 @@ class HardwareDataMonitor {
           rawText: rawText,
           scan: scan,
           cc1101Sample: cc1101Sample,
+          wifiNetworks: wifiNetworks,
           error: error,
         ),
       );

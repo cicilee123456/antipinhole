@@ -1,5 +1,43 @@
 import 'dart:convert';
 
+class WifiAccessPoint {
+  const WifiAccessPoint({
+    required this.ssid,
+    required this.rssi,
+    required this.distanceMeters,
+  });
+
+  factory WifiAccessPoint.fromJson(Map<String, dynamic> json) {
+    final ssid = json['ssid'] ?? json['name'];
+    if (ssid is! String) {
+      throw const FormatException('Wi-Fi AP ssid 必須是字串');
+    }
+
+    return WifiAccessPoint(
+      ssid: ssid.isEmpty ? '[Hidden SSID]' : ssid,
+      rssi: _toDouble(json['rssi'] ?? json['signal'], 'rssi'),
+      distanceMeters: _toDouble(
+        json['distance_m'] ?? json['distance_meters'] ?? json['distance'],
+        'distance_m',
+      ),
+    );
+  }
+
+  final String ssid;
+  final double? rssi;
+  final double? distanceMeters;
+
+  static double? _toDouble(Object? value, String field) {
+    if (value == null) return null;
+    if (value is num) return value.toDouble();
+    final parsed = double.tryParse('$value');
+    if (parsed == null) {
+      throw FormatException('Wi-Fi AP $field 必須是數值');
+    }
+    return parsed;
+  }
+}
+
 class Cc1101DiagnosticSample {
   const Cc1101DiagnosticSample({
     required this.capturedAt,
@@ -16,6 +54,11 @@ class Cc1101DiagnosticSample {
     this.irProtocol,
     this.irAddress,
     this.irCommand,
+    this.irCode,
+    this.rfDetected,
+    this.thermalDataReported = false,
+    this.wifiNetworks = const [],
+    this.wifiDeviceCount,
   });
 
   factory Cc1101DiagnosticSample.fromJson(Map<String, dynamic> json) {
@@ -30,8 +73,24 @@ class Cc1101DiagnosticSample {
             values['thermal_pixels'] ??
             values['thermal'] ??
             values['pixels'];
+    final thermalDataReported = values.containsKey('amg8833') ||
+        values.containsKey('thermal_pixels') ||
+        values.containsKey('thermal') ||
+        values.containsKey('pixels');
     final thermalPixels =
         thermalSource is List ? _parseThermalPixels(thermalSource) : null;
+    final wifiSource = values['wifi_networks'] ??
+        values['wifiNetworks'] ??
+        (values['wifi'] is List ? values['wifi'] : null);
+    final wifiNetworks = wifiSource == null
+        ? const <WifiAccessPoint>[]
+        : _parseWifiNetworks(wifiSource);
+    final wifiDeviceCount = _toInt(
+          values['wifi_count'] ??
+              values['wifi_device_count'] ??
+              (values['wifi'] is num ? values['wifi'] : null),
+        ) ??
+        wifiNetworks.length;
     final vs1838b = values['vs1838b'];
     final irValues = vs1838b is Map<String, dynamic>
         ? <String, dynamic>{...values, ...vs1838b}
@@ -87,6 +146,11 @@ class Cc1101DiagnosticSample {
           _toStringOrNull(irValues['ir_protocol'] ?? irValues['protocol']),
       irAddress: _toStringOrNull(irValues['ir_address'] ?? irValues['address']),
       irCommand: _toStringOrNull(irValues['ir_command'] ?? irValues['command']),
+      irCode: _toStringOrNull(irValues['ir_code'] ?? irValues['code']),
+      rfDetected: _toBool(values['rf_detected']),
+      thermalDataReported: thermalDataReported,
+      wifiNetworks: wifiNetworks,
+      wifiDeviceCount: wifiDeviceCount,
     );
   }
 
@@ -104,6 +168,11 @@ class Cc1101DiagnosticSample {
   final String? irProtocol;
   final String? irAddress;
   final String? irCommand;
+  final String? irCode;
+  final bool? rfDetected;
+  final bool thermalDataReported;
+  final List<WifiAccessPoint> wifiNetworks;
+  final int? wifiDeviceCount;
 
   String toJsonLine() => jsonEncode({
         'captured_at': capturedAt.toUtc().toIso8601String(),
@@ -119,6 +188,17 @@ class Cc1101DiagnosticSample {
         'ir_protocol': irProtocol,
         'ir_address': irAddress,
         'ir_command': irCommand,
+        'ir_code': irCode,
+        'rf_detected': rfDetected,
+        'thermal_data_reported': thermalDataReported,
+        'wifi_count': wifiDeviceCount,
+        'wifi_networks': wifiNetworks
+            .map((network) => {
+                  'ssid': network.ssid,
+                  'rssi': network.rssi,
+                  'distance_m': network.distanceMeters,
+                })
+            .toList(growable: false),
         'raw': rawJson,
       });
 
@@ -152,6 +232,18 @@ class Cc1101DiagnosticSample {
     return values.map((value) {
       if (value is num) return value.toDouble();
       throw const FormatException('AMG8833 thermal pixels 只能包含數值');
+    }).toList(growable: false);
+  }
+
+  static List<WifiAccessPoint> _parseWifiNetworks(Object? value) {
+    if (value is! List) {
+      throw const FormatException('wifi_networks 必須是陣列');
+    }
+    return value.map((entry) {
+      if (entry is! Map<String, dynamic>) {
+        throw const FormatException('wifi_networks 項目必須是 JSON 物件');
+      }
+      return WifiAccessPoint.fromJson(entry);
     }).toList(growable: false);
   }
 

@@ -58,6 +58,78 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
     });
   }
 
+  void _showWifiDetails(
+    List<WifiAccessPoint> networks,
+    int detectedCount,
+    bool wifiListReceived,
+  ) {
+    showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Wi-Fi 偵測 ($detectedCount)'),
+        content: SizedBox(
+          width: 440,
+          height: 360,
+          child: networks.isEmpty
+              ? Center(
+                  child: Text(
+                    detectedCount == 0
+                        ? '目前沒有偵測到 Wi-Fi AP。'
+                        : wifiListReceived
+                            ? '已收到 Wi-Fi 清單，但目前沒有可顯示的 AP 詳細資料。'
+                            : '韌體回報偵測到 $detectedCount 個 AP，'
+                                '但尚未透過 BLE 傳送 SSID、RSSI 與距離清單。',
+                    textAlign: TextAlign.center,
+                  ),
+                )
+              : Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (detectedCount > networks.length) ...[
+                      Text(
+                        '偵測到 $detectedCount 個 AP，以下列出 ${networks.length} 筆。',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      const SizedBox(height: 8),
+                    ],
+                    Expanded(
+                      child: ListView.separated(
+                        itemCount: networks.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final network = networks[index];
+                          return ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: Text(
+                              network.ssid,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            subtitle: Text(
+                              'RSSI ${_formatRssi(network.rssi)}',
+                            ),
+                            trailing: Text(
+                              network.distanceMeters == null
+                                  ? '-- m'
+                                  : '${network.distanceMeters!.toStringAsFixed(2)} m',
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('關閉'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _persistSopDecision(
     ScanData scan,
     SopDecision decision,
@@ -104,10 +176,7 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
 
   Future<void> _connect(HardwareConnectionType type) async {
     try {
-      await _service!.connect(
-        type,
-        fallbackToSimulator: true,
-      );
+      await _service!.connect(type);
     } catch (error) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -156,13 +225,25 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
     final service = HardwareConnectionScope.of(context);
     final scan = service.latestScan;
     final cc1101Sample = service.latestCc1101Sample;
-    final thermalGrid = scan?.thermalGrid ?? cc1101Sample?.thermalPixels;
+    final wifiNetworks = service.latestWifiNetworks ??
+        cc1101Sample?.wifiNetworks ??
+        const <WifiAccessPoint>[];
+    final wifiDeviceCount = math.max(
+      wifiNetworks.length,
+      math.max(
+        cc1101Sample?.wifiDeviceCount ?? 0,
+        scan?.wifiDeviceCount ?? 0,
+      ),
+    );
     final activeConnection = service.activeConnection;
     final isScanning = service.isScanning;
     final isEsp32Connected =
         activeConnection == HardwareConnectionType.esp32Bluetooth &&
             service.stateFor(HardwareConnectionType.esp32Bluetooth).status ==
                 HardwareConnectionStatus.connected;
+    final thermalGrid = isEsp32Connected
+        ? cc1101Sample?.thermalPixels ?? scan?.thermalGrid
+        : scan?.thermalGrid ?? cc1101Sample?.thermalPixels;
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
@@ -173,7 +254,7 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               _ConnectionCard(
-                title: 'CC1101_BLE',
+                title: 'ESP32 ThermoCam',
                 icon: Icons.bluetooth,
                 state: service.stateFor(
                   HardwareConnectionType.esp32Bluetooth,
@@ -206,12 +287,12 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
                   minTemp: 20,
                   maxTemp: 40,
                   warningThreshold: 35,
+                  autoScale: isEsp32Connected,
                 ),
               if (thermalGrid == null && isEsp32Connected) ...[
                 const SizedBox(height: 8),
                 const Text(
-                  '目前韌體只傳送 CC1101 診斷資料，尚未傳送 64 格熱像資料；'
-                  '熱圖與溫差風險判定需由韌體另外提供熱像資料。',
+                  'ESP32 未提供有效的 64 格熱像資料，請確認 AMG8833 初始化及韌體通知內容。',
                   textAlign: TextAlign.center,
                 ),
               ],
@@ -221,7 +302,7 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
               if (isScanning) ...[
                 const SizedBox(height: 8),
                 Text(
-                  service.isSimulating ? '模擬模式 · 未連接硬體' : 'CC1101_BLE 即時資料',
+                  service.isSimulating ? '模擬模式 · 未連接硬體' : 'ESP32 BLE 即時資料',
                   textAlign: TextAlign.center,
                   style: Theme.of(context).textTheme.labelMedium,
                 ),
@@ -231,18 +312,22 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
                 children: [
                   Expanded(
                     child: _SignalCard(
-                      icon: Icons.bluetooth,
-                      label: 'ESP32 BLE RSSI',
-                      value: service.supportsBleRssi
-                          ? _formatRssi(service.esp32Rssi?.toDouble())
-                          : '此平台不支援',
+                      icon: Icons.wifi,
+                      label: 'Wi-Fi 偵測',
+                      value: '點擊查看',
+                      onTap: () => _showWifiDetails(
+                        wifiNetworks,
+                        wifiDeviceCount,
+                        service.latestWifiNetworks != null ||
+                            wifiNetworks.isNotEmpty,
+                      ),
                     ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: _SignalCard(
                       icon: Icons.sensors_outlined,
-                      label: '熱像 RSSI',
+                      label: '風險判定 RSSI',
                       value: _formatRssi(scan?.rssi),
                     ),
                   ),
@@ -252,18 +337,14 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
               _SignalCard(
                 icon: Icons.wifi_tethering_outlined,
                 label: 'CC1101 RSSI',
-                value: _formatRssi(cc1101Sample?.rssi),
-              ),
-              if (service.esp32RssiError != null) ...[
-                const SizedBox(height: 4),
-                Text(
-                  'ESP32 BLE RSSI 讀取失敗：${service.esp32RssiError}',
-                  style: TextStyle(color: Theme.of(context).colorScheme.error),
+                value: _formatRssi(
+                  cc1101Sample?.rssi ?? scan?.rssi,
                 ),
-              ],
+              ),
               const SizedBox(height: 12),
               _SensorDataCard(
                 sample: cc1101Sample,
+                thermalGrid: scan?.thermalGrid,
                 isSimulating: service.isSimulating,
               ),
             ],
@@ -275,7 +356,7 @@ class _HardwareMonitorViewState extends State<HardwareMonitorView> {
 }
 
 String _connectionName(HardwareConnectionType type) => switch (type) {
-      HardwareConnectionType.esp32Bluetooth => 'CC1101_BLE',
+      HardwareConnectionType.esp32Bluetooth => 'ESP32 BLE',
     };
 
 class _ConnectionCard extends StatelessWidget {
@@ -427,15 +508,17 @@ class _SignalCard extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.value,
+    this.onTap,
   });
 
   final IconData icon;
   final String label;
   final String value;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Card(
+    final card = Card(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 18),
         child: Row(
@@ -457,21 +540,30 @@ class _SignalCard extends StatelessWidget {
         ),
       ),
     );
+    return onTap == null
+        ? card
+        : InkWell(
+            onTap: onTap,
+            borderRadius: BorderRadius.circular(12),
+            child: card,
+          );
   }
 }
 
 class _SensorDataCard extends StatelessWidget {
   const _SensorDataCard({
     required this.sample,
+    required this.thermalGrid,
     required this.isSimulating,
   });
 
   final Cc1101DiagnosticSample? sample;
+  final List<double>? thermalGrid;
   final bool isSimulating;
 
   @override
   Widget build(BuildContext context) {
-    final thermalPixels = sample?.thermalPixels;
+    final thermalPixels = sample?.thermalPixels ?? thermalGrid;
     final thermalSummary = thermalPixels == null
         ? '韌體尚未透過 BLE 上報'
         : _thermalSummary(thermalPixels);
@@ -498,14 +590,20 @@ class _SensorDataCard extends StatelessWidget {
             _SensorStatusRow(
               icon: Icons.device_thermostat,
               title: 'AMG8833 熱像',
-              value: thermalSummary,
+              value: thermalPixels != null
+                  ? thermalSummary
+                  : sample?.thermalDataReported == true
+                      ? '韌體回報感測器不可用（thermal 為 null）'
+                      : thermalSummary,
               isAvailable: thermalPixels != null,
             ),
             const Divider(height: 20),
             _SensorStatusRow(
               icon: Icons.sensors,
               title: 'CC1101 射頻',
-              value: cc1101Status,
+              value: sample == null
+                  ? cc1101Status
+                  : '${sample!.rfDetected == null ? '' : sample!.rfDetected! ? 'RF 已偵測 · ' : '目前無 RF 封包 · '}$cc1101Status',
               isAvailable: sample != null && !isSimulating,
             ),
             const Divider(height: 20),
@@ -526,6 +624,7 @@ class _SensorDataCard extends StatelessWidget {
       if (value.irProtocol != null) '協定 ${value.irProtocol}',
       if (value.irAddress != null) '位址 ${value.irAddress}',
       if (value.irCommand != null) '指令 ${value.irCommand}',
+      if (value.irCode != null) '代碼 ${value.irCode}',
     ];
     return parts.isEmpty ? '' : '（${parts.join(' · ')}）';
   }

@@ -54,6 +54,7 @@ class HardwareConnectionService extends ChangeNotifier {
   HardwareConnectionType? _activeConnection;
   ScanData? _latestScan;
   Cc1101DiagnosticSample? _latestCc1101Sample;
+  List<WifiAccessPoint>? _latestWifiNetworks;
   int? _esp32Rssi;
   String? _esp32RssiError;
   DateTime? _lastRiskAt;
@@ -65,6 +66,7 @@ class HardwareConnectionService extends ChangeNotifier {
   Stream<ScanData> get riskEvents => _riskController.stream;
   ScanData? get latestScan => _latestScan;
   Cc1101DiagnosticSample? get latestCc1101Sample => _latestCc1101Sample;
+  List<WifiAccessPoint>? get latestWifiNetworks => _latestWifiNetworks;
   int? get esp32Rssi => _esp32Rssi;
   String? get esp32RssiError => _esp32RssiError;
   bool get supportsBleRssi => _bleService.supportsRssi;
@@ -167,7 +169,25 @@ class HardwareConnectionService extends ChangeNotifier {
       _checkRisk(event.scan!);
     }
     if (event.cc1101Sample != null) {
-      _latestCc1101Sample = event.cc1101Sample;
+      final sample = event.cc1101Sample!;
+      _latestCc1101Sample = sample;
+      final thermalPixels = sample.thermalPixels;
+      if (thermalPixels != null && sample.rssi != null) {
+        _latestScan = ScanData(
+          id: 'cc1101-thermal-${sample.capturedAt.microsecondsSinceEpoch}',
+          deviceName: Esp32BleService.thermoCamDeviceName,
+          rssi: sample.rssi!,
+          thermalGrid: thermalPixels,
+          capturedAt: sample.capturedAt.toIso8601String(),
+          irDetected: sample.irDetected ?? false,
+        );
+        _checkRisk(_latestScan!);
+      } else if (sample.thermalDataReported) {
+        _latestScan = null;
+      }
+    }
+    if (event.wifiNetworks != null) {
+      _latestWifiNetworks = List.unmodifiable(event.wifiNetworks!);
     }
     _eventsController.add(event);
     notifyListeners();

@@ -14,6 +14,7 @@ class ThermalHeatmap64View extends StatefulWidget {
     this.minTemp = 20.0,
     this.maxTemp = 40.0,
     this.warningThreshold = 35.0,
+    this.autoScale = false,
   });
 
   static const int gridSize = 64;
@@ -31,11 +32,13 @@ class ThermalHeatmap64View extends StatefulWidget {
   final double minTemp;
   final double maxTemp;
   final double warningThreshold;
+  final bool autoScale;
 
   static Uint8List encodePixels(
     List<List<double>> temperatures, {
     double minTemp = 20.0,
     double maxTemp = 40.0,
+    bool autoScale = false,
   }) {
     if (temperatures.length != gridSize ||
         temperatures.any((row) => row.length != gridSize)) {
@@ -49,9 +52,41 @@ class ThermalHeatmap64View extends StatefulWidget {
       throw ArgumentError('maxTemp 必須是大於有限 minTemp 的有限數值');
     }
 
+    var colorMin = minTemp;
+    var colorMax = maxTemp;
+    if (autoScale) {
+      final values = <double>[];
+      for (final row in temperatures) {
+        for (final temperature in row) {
+          if (!temperature.isFinite) {
+            throw ArgumentError.value(
+              temperature,
+              'temperatures',
+              '溫度值必須是有限數值',
+            );
+          }
+          values.add(temperature);
+        }
+      }
+      values.sort();
+      final dataMin = values[((values.length - 1) * 0.05).floor()];
+      final dataMax = values[((values.length - 1) * 0.95).ceil()];
+      const minimumColorRange = 6.0;
+      final dataRange = dataMax - dataMin;
+      if (dataRange < minimumColorRange) {
+        final center = (dataMin + dataMax) / 2;
+        colorMin = center - minimumColorRange / 2;
+        colorMax = center + minimumColorRange / 2;
+      } else {
+        final padding = dataRange * 0.05;
+        colorMin = dataMin - padding;
+        colorMax = dataMax + padding;
+      }
+    }
+
     final pixels = Uint8List(pixelByteLength);
     var pixelIndex = 0;
-    final temperatureRange = maxTemp - minTemp;
+    final temperatureRange = colorMax - colorMin;
 
     for (final row in temperatures) {
       for (final temperature in row) {
@@ -62,7 +97,7 @@ class ThermalHeatmap64View extends StatefulWidget {
             '溫度值必須是有限數值',
           );
         }
-        final normalized = ((temperature - minTemp) / temperatureRange)
+        final normalized = ((temperature - colorMin) / temperatureRange)
             .clamp(0.0, 1.0)
             .toDouble();
         final scaledStop = normalized * (_colorStops.length - 1);
@@ -150,7 +185,8 @@ class _ThermalHeatmap64ViewState extends State<ThermalHeatmap64View> {
         _renderImage(_temperatures!);
         _startMockStream();
       } else if (oldWidget.minTemp != widget.minTemp ||
-          oldWidget.maxTemp != widget.maxTemp) {
+          oldWidget.maxTemp != widget.maxTemp ||
+          oldWidget.autoScale != widget.autoScale) {
         _renderImage(_temperatures!);
       }
     } else {
@@ -158,7 +194,8 @@ class _ThermalHeatmap64ViewState extends State<ThermalHeatmap64View> {
       _mockTimer = null;
       if (!identical(oldWidget.temperatures, widget.temperatures) ||
           oldWidget.minTemp != widget.minTemp ||
-          oldWidget.maxTemp != widget.maxTemp) {
+          oldWidget.maxTemp != widget.maxTemp ||
+          oldWidget.autoScale != widget.autoScale) {
         _temperatures = widget.temperatures;
         _updateTemperatureStats(_temperatures!);
         _renderImage(_temperatures!);
@@ -201,6 +238,7 @@ class _ThermalHeatmap64ViewState extends State<ThermalHeatmap64View> {
       temperatures,
       minTemp: widget.minTemp,
       maxTemp: widget.maxTemp,
+      autoScale: widget.autoScale,
     );
     ui.decodeImageFromPixels(
       pixels,
@@ -246,6 +284,13 @@ class _ThermalHeatmap64ViewState extends State<ThermalHeatmap64View> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (widget.autoScale) ...[
+              Text(
+                '硬體自動色階（僅調整顯示對比）',
+                style: Theme.of(context).textTheme.labelSmall,
+              ),
+              const SizedBox(height: 8),
+            ],
             ClipRRect(
               borderRadius: BorderRadius.circular(10),
               child: AspectRatio(

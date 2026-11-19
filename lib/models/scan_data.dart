@@ -78,7 +78,10 @@ class ScanData {
       thermalGrid: thermalGrid,
       capturedAt: DateTime.now().toIso8601String(),
       irDetected: json['ir'] == 1 || json['ir'] == true,
-      wifiDeviceCount: (json['wifi'] as num?)?.toInt() ?? 0,
+      wifiDeviceCount: (json['wifi_count'] as num?)?.toInt() ??
+          (json['wifi_device_count'] as num?)?.toInt() ??
+          (json['wifi'] as num?)?.toInt() ??
+          0,
     );
   }
 
@@ -115,7 +118,8 @@ class ScanData {
   factory ScanData.fromEsp32Json(Map<String, dynamic> json) {
     final rawPixels = json['pixels'] ?? json['thermal_grid'] ?? json['thermal'];
     if (rawPixels is! List || rawPixels.length != 64) {
-      throw const FormatException('ESP32 pixels、thermal_grid 或 thermal 必須是長度 64 的陣列');
+      throw const FormatException(
+          'ESP32 pixels、thermal_grid 或 thermal 必須是長度 64 的陣列');
     }
 
     final thermalGrid = rawPixels.map((value) {
@@ -127,16 +131,17 @@ class ScanData {
       id: 'esp32-${DateTime.now().microsecondsSinceEpoch}',
       deviceName: json['device_name']?.toString() ?? 'ESP32 Thermal Sensor',
       rssi: ((json['rf_rssi'] ??
-              json['esp32_rssi'] ??
-              json['ESP32RSSI'] ??
-              json['rssi']) as num?)
+                  json['esp32_rssi'] ??
+                  json['ESP32RSSI'] ??
+                  json['rssi']) as num?)
               ?.toDouble() ??
           -70.0,
       thermalGrid: thermalGrid,
       capturedAt:
           json['captured_at']?.toString() ?? DateTime.now().toIso8601String(),
       irDetected: json['ir'] == 1 || json['ir'] == true,
-      wifiDeviceCount: (json['wifi_devices'] as num?)?.toInt() ??
+      wifiDeviceCount: (json['wifi_count'] as num?)?.toInt() ??
+          (json['wifi_devices'] as num?)?.toInt() ??
           (json['wifi'] as num?)?.toInt() ??
           0,
     );
