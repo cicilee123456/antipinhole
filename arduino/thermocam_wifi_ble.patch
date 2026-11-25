@@ -1,0 +1,111 @@
+--- a/thermocam_wifi.ino
++++ b/thermocam_wifi.ino
+@@ -1,8 +1,9 @@
+ #include <Arduino.h>
++#include <ArduinoJson.h>
+ #include <Wire.h>
+ #include <WiFi.h>
+ #include <WiFiUdp.h>
+ #include <Adafruit_AMG88xx.h>
+ #include <NimBLEDevice.h>
+ #include <math.h>
+ #include <map>
+@@ -43,3 +44,12 @@
+ static_assert(sizeof(SensorPayload) == 132, "SensorPayload 必須是 132 bytes");
+ 
+ SensorPayload txData;
++
++struct WifiTelemetryEntry {
++  String ssid;
++  float rssi;
++  float distanceMeters;
++};
++constexpr int MAX_WIFI_TELEMETRY_ENTRIES = 10;
++WifiTelemetryEntry wifiTelemetry[MAX_WIFI_TELEMETRY_ENTRIES];
++int wifiTelemetryCount = 0;
+@@ -110,6 +119,28 @@
+ float rssiToDistance(float rssi) {
+   if (rssi >= 0) return -1.0;
+   return pow(10.0, (A_1M_RSSI - rssi) / (10.0 * PATH_LOSS_N));
+ }
++
++void rememberWifiAp(const String& rawSsid, float filteredRssi) {
++  WifiTelemetryEntry entry = {
++    rawSsid.length() == 0 ? "[Hidden SSID]" : rawSsid,
++    filteredRssi,
++    rssiToDistance(filteredRssi)
++  };
++
++  if (wifiTelemetryCount < MAX_WIFI_TELEMETRY_ENTRIES) {
++    wifiTelemetry[wifiTelemetryCount++] = entry;
++    return;
++  }
++
++  int weakest = 0;
++  for (int i = 1; i < wifiTelemetryCount; ++i) {
++    if (wifiTelemetry[i].rssi < wifiTelemetry[weakest].rssi) weakest = i;
++  }
++  if (filteredRssi > wifiTelemetry[weakest].rssi) {
++    wifiTelemetry[weakest] = entry;
++  }
++}
++
+ 
+ String getZoneLevel(float r) {
+@@ -305,10 +335,13 @@
+   if (r >= 0) {
+     scanCount++;
+     wifiApCount = r;
++    wifiTelemetryCount = 0;
+     txData.wifiDeviceCount = (uint8_t)min(r, 255);
+ 
+     for (int i = 0; i < r; ++i) {
+       int rawRssi = WiFi.RSSI(i);
+       if (rawRssi < -98) continue;
+-      kalmanMap[WiFi.BSSIDstr(i)].update((float)rawRssi);
++      float filteredRssi =
++          kalmanMap[WiFi.BSSIDstr(i)].update((float)rawRssi);
++      rememberWifiAp(WiFi.SSID(i), filteredRssi);
+     }
+@@ -370,5 +403,37 @@
+ void sendBlePacket() {
+   if (!deviceConnected) return;
+-  pCharacteristic->setValue((uint8_t*)&txData, sizeof(txData));
+-  pCharacteristic->notify();
++  JsonDocument document;
++  document["captured_at"] = millis();
++  JsonArray thermal = document["thermal"].to<JsonArray>();
++  for (int i = 0; i < AMG88xx_PIXEL_ARRAY_SIZE; ++i) {
++    thermal.add(txData.thermalPixels[i] / 10.0f);
++  }
++  document["rf_rssi"] = txData.rfRssi;
++  document["ir"] = txData.irDetected;
++  document["wifi_count"] = txData.wifiDeviceCount;
++
++  JsonArray networks = document["wifi_networks"].to<JsonArray>();
++  for (int i = 0; i < wifiTelemetryCount; ++i) {
++    JsonObject network = networks.add<JsonObject>();
++    network["ssid"] = wifiTelemetry[i].ssid;
++    network["rssi"] = wifiTelemetry[i].rssi;
++    network["distance_m"] = wifiTelemetry[i].distanceMeters;
++  }
++
++  String payload;
++  serializeJson(document, payload);
++  pCharacteristic->setValue(payload.c_str());
++
++  // Keep the notification size compatible with BLE's default ATT MTU.
++  constexpr size_t CHUNK_SIZE = 20;
++  const uint8_t* bytes =
++      reinterpret_cast<const uint8_t*>(payload.c_str());
++  for (size_t offset = 0; offset < payload.length(); offset += CHUNK_SIZE) {
++    const size_t remaining = payload.length() - offset;
++    const size_t chunkLength =
++        remaining < CHUNK_SIZE ? remaining : CHUNK_SIZE;
++    if (!pCharacteristic->notify(bytes + offset, chunkLength)) {
++      Serial.println("[BLE] Wi-Fi/thermal notification failed");
++      break;
++    }
++    delay(4);
++  }
+ }

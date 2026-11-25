@@ -1,0 +1,350 @@
+import 'dart:async';
+import 'dart:math';
+
+import 'package:flutter/material.dart';
+
+import '../models/cc1101_diagnostic_sample.dart';
+import '../models/scan_data.dart';
+import 'hardware_data_monitor.dart';
+import 'thermal_simulator.dart';
+import 'esp32_ble_service.dart';
+
+enum HardwareConnectionType { esp32Bluetooth }
+
+enum HardwareConnectionStatus {
+  disconnected,
+  connecting,
+  connected,
+  error,
+}
+
+class HardwareConnectionState {
+  const HardwareConnectionState({
+    this.status = HardwareConnectionStatus.disconnected,
+    this.error,
+  });
+
+  final HardwareConnectionStatus status;
+  final String? error;
+}
+
+class HardwareConnectionService extends ChangeNotifier {
+  HardwareConnectionService({
+    Esp32BleService? bleService,
+    this.sopCooldown = const Duration(seconds: 20),
+  }) : _bleService = bleService ?? Esp32BleService() {
+    _dataSubscription =
+        HardwareDataMonitor.instance.events.listen(_handleDataEvent);
+  }
+
+  static const _simulator = ThermalSimulator();
+
+  final Duration sopCooldown;
+  final Esp32BleService _bleService;
+  final _random = Random();
+  final _states = {
+    HardwareConnectionType.esp32Bluetooth: const HardwareConnectionState(),
+  };
+  final _eventsController = StreamController<HardwareDataEvent>.broadcast();
+  final _riskController = StreamController<ScanData>.broadcast();
+
+  StreamSubscription<HardwareDataEvent>? _dataSubscription;
+  Timer? _simulationTimer;
+  Timer? _rssiTimer;
+  HardwareConnectionType? _activeConnection;
+  ScanData? _latestScan;
+  Cc1101DiagnosticSample? _latestCc1101Sample;
+  List<WifiAccessPoint>? _latestWifiNetworks;
+  int? _esp32Rssi;
+  String? _esp32RssiError;
+  DateTime? _lastRiskAt;
+  bool _isClosed = false;
+  bool _isReadingRssi = false;
+  int _rssiGeneration = 0;
+
+  Stream<HardwareDataEvent> get events => _eventsController.stream;
+  Stream<ScanData> get riskEvents => _riskController.stream;
+  ScanData? get latestScan => _latestScan;
+  Cc1101DiagnosticSample? get latestCc1101Sample => _latestCc1101Sample;
+  List<WifiAccessPoint>? get latestWifiNetworks => _latestWifiNetworks;
+  int? get esp32Rssi => _esp32Rssi;
+  String? get esp32RssiError => _esp32RssiError;
+  bool get supportsBleRssi => _bleService.supportsRssi;
+  HardwareConnectionType? get activeConnection => _activeConnection;
+  bool get isSimulating => _simulationTimer != null;
+
+  HardwareConnectionType? get failedConnection {
+    for (final type in HardwareConnectionType.values) {
+      if (_states[type]?.status == HardwareConnectionStatus.error) return type;
+    }
+    return null;
+  }
+
+  bool get isScanning =>
+      isSimulating ||
+      (_activeConnection != null &&
+          _states[_activeConnection]?.status ==
+              HardwareConnectionStatus.connected);
+
+  HardwareConnectionState stateFor(HardwareConnectionType type) =>
+      _states[type]!;
+
+  bool get canConnect => _activeConnection == null && !isSimulating;
+
+  Future<void> connect(
+    HardwareConnectionType type, {
+    bool fallbackToSimulator = false,
+  }) async {
+    if (_isClosed) throw StateError('硬體連線服務已關閉');
+    if (_activeConnection == type &&
+        stateFor(type).status == HardwareConnectionStatus.connected) {
+      return;
+    }
+    if (!canConnect) {
+      throw StateError('請先中斷目前的連線或停止模擬掃描');
+    }
+
+    _activeConnection = type;
+    _setState(
+        type,
+        const HardwareConnectionState(
+          status: HardwareConnectionStatus.connecting,
+        ));
+
+    try {
+      await _bleService.connect();
+
+      if (_isClosed) return;
+      _setState(
+          type,
+          const HardwareConnectionState(
+            status: HardwareConnectionStatus.connected,
+          ));
+      _startRssiMonitoring();
+    } catch (error) {
+      try {
+        await _releaseConnection(type);
+      } catch (cleanupError) {
+        if (!_isClosed) _setConnectionError(type, cleanupError);
+        rethrow;
+      }
+      if (_isClosed) return;
+      _setConnectionError(type, error);
+      if (fallbackToSimulator) {
+        _startSimulator();
+        return;
+      }
+      rethrow;
+    }
+  }
+
+  Future<void> disconnect([HardwareConnectionType? type]) async {
+    final connection = type ?? _activeConnection;
+    if (connection == null) {
+      stopSimulation();
+      return;
+    }
+    if (_activeConnection != connection) return;
+
+    _setState(
+        connection,
+        const HardwareConnectionState(
+          status: HardwareConnectionStatus.connecting,
+        ));
+    try {
+      await _releaseConnection(connection);
+      if (!_isClosed) {
+        _setState(connection, const HardwareConnectionState());
+      }
+    } catch (error) {
+      if (!_isClosed) _setConnectionError(connection, error);
+      rethrow;
+    }
+  }
+
+  void _handleDataEvent(HardwareDataEvent event) {
+    if (_isClosed) return;
+    if (event.scan != null) {
+      _latestScan = event.scan;
+      _checkRisk(event.scan!);
+    }
+    if (event.cc1101Sample != null) {
+      final sample = event.cc1101Sample!;
+      _latestCc1101Sample = sample;
+      final thermalPixels = sample.thermalPixels;
+      if (thermalPixels != null && sample.rssi != null) {
+        _latestScan = ScanData(
+          id: 'cc1101-thermal-${sample.capturedAt.microsecondsSinceEpoch}',
+          deviceName: Esp32BleService.thermoCamDeviceName,
+          rssi: sample.rssi!,
+          thermalGrid: thermalPixels,
+          capturedAt: sample.capturedAt.toIso8601String(),
+          irDetected: sample.irDetected ?? false,
+        );
+        _checkRisk(_latestScan!);
+      } else if (sample.thermalDataReported) {
+        _latestScan = null;
+      }
+    }
+    if (event.wifiNetworks != null) {
+      _latestWifiNetworks = List.unmodifiable(event.wifiNetworks!);
+    }
+    _eventsController.add(event);
+    notifyListeners();
+  }
+
+  void _checkRisk(ScanData scan) {
+    final result = scan.analyze();
+    final highRisk = result.deltaT >= 6.0 && result.rssi >= -50.0;
+    if (!highRisk) return;
+
+    final lastRiskAt = _lastRiskAt;
+    if (lastRiskAt != null &&
+        DateTime.now().difference(lastRiskAt) < sopCooldown) {
+      return;
+    }
+    _lastRiskAt = DateTime.now();
+    _riskController.add(scan);
+  }
+
+  void _startSimulator() {
+    if (_simulationTimer != null || _isClosed) return;
+    _activeConnection = null;
+    _simulationTimer = Timer.periodic(
+      const Duration(milliseconds: 300),
+      (_) => _publishSimulatedData(),
+    );
+    _publishSimulatedData();
+    notifyListeners();
+  }
+
+  void stopSimulation() {
+    _simulationTimer?.cancel();
+    _simulationTimer = null;
+    notifyListeners();
+  }
+
+  void _publishSimulatedData() {
+    final scan = _simulator.scan();
+    HardwareDataMonitor.instance.add(
+      source: '熱成像模擬資料',
+      rawText: '',
+      scan: scan,
+    );
+    final sample = Cc1101DiagnosticSample(
+      capturedAt: DateTime.now(),
+      rssi: -90 + _random.nextDouble() * 45,
+      lqi: null,
+      crcOk: null,
+      receivedPackets: null,
+      lostPackets: null,
+      per: null,
+      distanceMeters: null,
+      rawJson: const {'simulated': true},
+    );
+    HardwareDataMonitor.instance.add(
+      source: 'CC1101 模擬資料',
+      rawText: sample.toJsonLine(),
+      cc1101Sample: sample,
+    );
+  }
+
+  Future<void> _releaseConnection(HardwareConnectionType type) async {
+    _stopRssiMonitoring();
+    await _bleService.disconnect();
+    _activeConnection = null;
+  }
+
+  void _startRssiMonitoring() {
+    _stopRssiMonitoring();
+    if (!supportsBleRssi) return;
+    unawaited(_refreshEsp32Rssi());
+    _rssiTimer = Timer.periodic(
+      const Duration(seconds: 2),
+      (_) => unawaited(_refreshEsp32Rssi()),
+    );
+  }
+
+  void _stopRssiMonitoring() {
+    _rssiGeneration++;
+    _rssiTimer?.cancel();
+    _rssiTimer = null;
+    _esp32Rssi = null;
+    _esp32RssiError = null;
+  }
+
+  Future<void> _refreshEsp32Rssi() async {
+    if (_isClosed || _isReadingRssi || _activeConnection == null) return;
+    final generation = _rssiGeneration;
+    _isReadingRssi = true;
+    try {
+      final rssi = await _bleService.readRssi();
+      if (!_isClosed &&
+          generation == _rssiGeneration &&
+          _activeConnection != null) {
+        _esp32Rssi = rssi;
+        _esp32RssiError = null;
+      }
+    } catch (error) {
+      if (!_isClosed &&
+          generation == _rssiGeneration &&
+          _activeConnection != null) {
+        _esp32Rssi = null;
+        _esp32RssiError = error.toString();
+      }
+    } finally {
+      _isReadingRssi = false;
+      if (!_isClosed) notifyListeners();
+    }
+  }
+
+  void _setConnectionError(HardwareConnectionType type, Object error) {
+    _activeConnection = null;
+    _setState(
+      type,
+      HardwareConnectionState(
+        status: HardwareConnectionStatus.error,
+        error: error.toString(),
+      ),
+    );
+  }
+
+  void _setState(HardwareConnectionType type, HardwareConnectionState state) {
+    _states[type] = state;
+    notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _isClosed = true;
+    _simulationTimer?.cancel();
+    _rssiTimer?.cancel();
+    unawaited(_dataSubscription?.cancel());
+    unawaited(_eventsController.close());
+    unawaited(_riskController.close());
+    unawaited(_bleService.dispose());
+    super.dispose();
+  }
+}
+
+class HardwareConnectionScope
+    extends InheritedNotifier<HardwareConnectionService> {
+  const HardwareConnectionScope({
+    required this.service,
+    required super.child,
+    super.key,
+  }) : super(notifier: service);
+
+  final HardwareConnectionService service;
+
+  static HardwareConnectionService of(BuildContext context) {
+    final scope =
+        context.dependOnInheritedWidgetOfExactType<HardwareConnectionScope>();
+    if (scope == null) {
+      throw FlutterError(
+        'HardwareConnectionScope is missing from this context.',
+      );
+    }
+    return scope.service;
+  }
+}

@@ -3,11 +3,12 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../models/cc1101_diagnostic_sample.dart';
 import '../models/scan_data.dart';
 import 'hardware_data_monitor.dart';
 
 class Esp32HttpService {
-  Esp32HttpService({String baseUrl = 'http://172.20.10.3'})
+  Esp32HttpService({String baseUrl = 'http://192.168.4.1'})
       : _endpoint = Uri.parse('$baseUrl/data');
 
   final Uri _endpoint;
@@ -75,6 +76,21 @@ class Esp32HttpService {
         rawText: response.body,
         scan: scan,
       );
+
+      final hasCc1101Data = decoded.containsKey('cc1101') ||
+          decoded.containsKey('cc1101_rssi') ||
+          decoded.containsKey('CC1101RSSI') ||
+          decoded.containsKey('CC1101_RSSI') ||
+          decoded.containsKey('cc1101RSSI') ||
+          decoded.containsKey('cc1101_lqi');
+      if (hasCc1101Data) {
+        final sample = Cc1101DiagnosticSample.fromJson(decoded);
+        HardwareDataMonitor.instance.add(
+          source: 'CC1101 HTTP',
+          rawText: response.body,
+          cc1101Sample: sample,
+        );
+      }
       return scan;
     } on FormatException catch (error) {
       HardwareDataMonitor.instance.add(

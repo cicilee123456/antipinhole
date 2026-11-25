@@ -9,21 +9,8 @@ enum SopDecision {
 class SopDialog extends StatelessWidget {
   const SopDialog({super.key});
 
-  static bool _isShowing = false;
-  static DateTime? _lastClosedTime;
-  static const _cooldown = Duration(seconds: 20);
-
-  static Future<SopDecision?> show(BuildContext context) async {
-    if (_isShowing) return null;
-    final lastClosedTime = _lastClosedTime;
-    if (lastClosedTime != null &&
-        DateTime.now().difference(lastClosedTime) < _cooldown) {
-      return null;
-    }
-
-    _isShowing = true;
-    try {
-      return await showDialog<SopDecision>(
+  static Future<SopDecision?> show(BuildContext context) =>
+      showDialog<SopDecision>(
         context: context,
         barrierDismissible: false,
         builder: (_) => const PopScope(
@@ -31,11 +18,6 @@ class SopDialog extends StatelessWidget {
           child: SopDialog(),
         ),
       );
-    } finally {
-      _isShowing = false;
-      _lastClosedTime = DateTime.now();
-    }
-  }
 
   @override
   Widget build(BuildContext context) {
@@ -73,7 +55,8 @@ class SopDialog extends StatelessWidget {
       ),
       actions: [
         FilledButton(
-          onPressed: () => Navigator.of(context).pop(SopDecision.confirmedDanger),
+          onPressed: () =>
+              Navigator.of(context).pop(SopDecision.confirmedDanger),
           style: FilledButton.styleFrom(backgroundColor: Colors.red),
           child: const Text('複檢異常'),
         ),
@@ -115,7 +98,8 @@ class _SopStep extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+                Text(title,
+                    style: const TextStyle(fontWeight: FontWeight.bold)),
                 const SizedBox(height: 3),
                 Text(description),
               ],

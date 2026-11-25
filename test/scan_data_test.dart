@@ -28,6 +28,26 @@ void main() {
       expect(result.weightedScore, closeTo(0.6 + 0.4, 0.0001));
     });
   });
+
+  test('parses ESP32 thermal_grid and ESP32RSSI fields', () {
+    final scan = ScanData.fromEsp32Json({
+      'thermal_grid': List<double>.filled(64, 28),
+      'ESP32RSSI': -65,
+    });
+
+    expect(scan.thermalGrid, hasLength(64));
+    expect(scan.rssi, -65);
+  });
+
+  test('parses the firmware Wi-Fi AP count field', () {
+    final scan = ScanData.fromEsp32Json({
+      'pixels': List<double>.filled(64, 25),
+      'rf_rssi': -70,
+      'wifi_count': 7,
+    });
+
+    expect(scan.wifiDeviceCount, 7);
+  });
 }
 
 ScanData _scan({required double deltaT, required double rssi}) {

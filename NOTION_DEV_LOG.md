@@ -702,3 +702,320 @@ test/widget_test.dart 使用不存在的 MyApp
 ## 四、今日結論
 
 硬體監控已成為精簡的即時總覽：可查看熱圖與溫度、ESP32 RSSI、CC1101 RSSI 及目前風險狀態，並可從同一頁啟動掃描。沒有 ESP32 硬體時會自動使用模擬資料，維持介面可操作與資料可見。
+
+---
+
+# 2026-11-09 工作日誌｜統一 ThermoCam BLE 連線與跨頁資料同步
+
+## 一、工作目標與需求背景
+
+本次將「硬體監控」頁定位為硬體操作的唯一整合主頁。使用者確認目前僅使用 ThermoCam_BLE 藍牙連線，同一裝置不需要在主頁呈現多個連線按鈕，因此移除 Wi-Fi 等連線操作入口，並把熱成像頁及 CC1101 診斷頁調整為共享資料的檢視頁。
+
+除了連線入口整併，也處理先前頁面各自維護資料、連線狀態造成的同步問題，並修復高風險掃描資料無法在硬體監控頁觸發 SOP 視窗的流程。此次重構目標是讓連線狀態、最新掃描快照和風險事件有一致的來源，頁面不再各自決定連線真相。
+
+## 二、架構調整與資料流
+
+### 2.1 建立根層共用硬體服務
+
+新增 `HardwareConnectionService` 作為應用程式執行期間共用的硬體連線與資料狀態中心：
+
+1. `AntiPinholeApp` 建立一個服務實例，並透過 `HardwareConnectionScope` 注入應用程式頁面樹；頁面藉由 scope 取得同一服務實例，不會各自建立 BLE 服務。
+2. 服務建立時訂閱 `HardwareDataMonitor.instance.events`。ThermoCam BLE 解析出的掃描資料，以及有發布的 CC1101 樣本都先進入這個共用事件流。
+3. 服務收到資料後更新 `latestScan`／`latestCc1101Sample` 快照，發布事件並通知訂閱頁重繪。新開啟的頁面可先讀最新快照，再接續訂閱後續事件。
+4. 服務統一持有連線狀態、模擬掃描 Timer 與資料訂閱；應用程式根層卸載時呼叫 `dispose()`，取消訂閱並釋放 BLE 服務及事件控制器。
+
+此設計把「硬體資料如何進入應用程式」與「各頁如何呈現資料」分開：硬體監控頁負責操作，其他頁面訂閱及呈現，不再以各自的 Timer 或本地布林值作為連線狀態來源。
+
+#### 關鍵程式：根層建立並提供共用服務
+
+位置：`lib/main.dart`
+
+```dart
+class _AntiPinholeAppState extends State<AntiPinholeApp> {
+  final _hardwareService = HardwareConnectionService();
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      builder: (context, child) => HardwareConnectionScope(
+        service: _hardwareService,
+        child: child ?? const SizedBox.shrink(),
+      ),
+      home: const HomePage(),
+    );
+  }
+
+  @override
+  void dispose() {
+    _hardwareService.dispose();
+    super.dispose();
+  }
+}
+```
+
+`HardwareConnectionService` 在根 Widget 建立，因此頁面切換不會重建另一個連線服務。`HardwareConnectionScope` 是 `InheritedNotifier`，除了提供服務，也會在服務 `notifyListeners()` 時通知依賴它的頁面重繪。根 Widget 結束時再釋放服務，避免 BLE 訂閱或 Timer 遺留。
+
+#### 關鍵程式：接收資料、更新快照並廣播
+
+位置：`lib/services/hardware_connection_service.dart`
+
+```dart
+HardwareConnectionService({
+  ThermoCamBleService? bleService,
+  this.sopCooldown = const Duration(seconds: 20),
+}) : _bleService = bleService ?? ThermoCamBleService() {
+  _dataSubscription =
+      HardwareDataMonitor.instance.events.listen(_handleDataEvent);
+}
+
+void _handleDataEvent(HardwareDataEvent event) {
+  if (_isClosed) return;
+  if (event.scan != null) {
+    _latestScan = event.scan;
+    _checkRisk(event.scan!);
+  }
+  if (event.cc1101Sample != null) {
+    _latestCc1101Sample = event.cc1101Sample;
+  }
+  _eventsController.add(event);
+  notifyListeners();
+}
+```
+
+建構時服務只訂閱一次全域 `HardwareDataMonitor`。收到事件後，先更新最新掃描／CC1101 快照，再將事件送到服務自己的廣播 Stream，最後通知依賴服務的 Widget 重繪。快照供頁面進入時立即讀取，Stream 則供需要逐筆處理事件的頁面訂閱。
+
+### 2.2 單一 ThermoCam_BLE 連線
+
+1. `ThermoCamBleService` 負責實際 BLE 連線工作：掃描指定裝置 `ThermoCam_BLE`、連線、探索服務與特徵值，並訂閱通知。
+2. 支援的平台資料通知可解析為熱像掃描資料；解析成功後透過 `HardwareDataMonitor` 發布，讓共用服務接收。解析失敗時保留錯誤事件，不會把格式錯誤資料當成有效掃描結果。
+3. `HardwareConnectionService` 對外提供 `disconnected`、`connecting`、`connected`、`error` 狀態，並集中執行 connect／disconnect。重複連線或目前有其他活動狀態時會受到服務層檢查。
+4. BLE 連線成功後，熱成像頁、CC1101 診斷頁與硬體監控頁讀取相同的連線狀態；斷線操作也由同一服務執行並同步更新狀態。
+5. 硬體監控頁連線失敗時會顯示錯誤，並依現有 UX 啟動模擬掃描 fallback；使用者可停止模擬。模擬資料只代表展示／測試資料，不代表硬體量測值。
+
+Wi-Fi 不再作為本次整合流程的連線方式，也不在硬體監控頁提供 Wi-Fi 連線控制。舊 `Esp32HttpService` 原始服務檔仍留在專案中，待確認無其他用途後再另行清理。
+
+#### 關鍵程式：連線狀態與錯誤處理
+
+位置：`lib/services/hardware_connection_service.dart`
+
+```dart
+Future<void> connect(
+  HardwareConnectionType type, {
+  bool fallbackToSimulator = false,
+}) async {
+  if (_isClosed) throw StateError('硬體連線服務已關閉');
+  if (_activeConnection == type &&
+      stateFor(type).status == HardwareConnectionStatus.connected) {
+    return;
+  }
+  if (!canConnect) {
+    throw StateError('請先中斷目前的連線或停止模擬掃描');
+  }
+
+  _activeConnection = type;
+  _setState(
+      type,
+      const HardwareConnectionState(
+        status: HardwareConnectionStatus.connecting,
+      ));
+  try {
+    await _bleService.connect();
+
+    if (_isClosed) return;
+    _setState(
+        type,
+        const HardwareConnectionState(
+          status: HardwareConnectionStatus.connected,
+        ));
+  } catch (error) {
+    try {
+      await _releaseConnection(type);
+    } catch (cleanupError) {
+      if (!_isClosed) _setConnectionError(type, cleanupError);
+      rethrow;
+    }
+    if (_isClosed) return;
+    _setConnectionError(type, error);
+    if (fallbackToSimulator) {
+      _startSimulator();
+      return;
+    }
+    rethrow;
+  }
+}
+```
+
+連線狀態由服務更新，而非由按鈕的區域狀態推測。開始連線先設為 `connecting`，完成後設為 `connected`；連線例外時先嘗試釋放連線，再保留錯誤狀態。硬體監控頁可選擇啟用模擬 fallback，但連線失敗仍會被服務記錄，不會偽裝成 BLE 已連線。
+
+## 三、頁面調整
+
+### 3.1 硬體監控頁：統一操作入口
+
+`HardwareMonitorView` 保留單一 ThermoCam_BLE 連線卡片，依服務狀態顯示連線／斷線操作及目前狀態。連線按鈕呼叫共用服務並啟用模擬 fallback；斷線按鈕呼叫服務釋放 BLE 資源，模擬狀態則提供停止模擬的操作。
+
+頁面繼續呈現共用即時掃描結果，包括熱成像熱圖、風險判定、ThermoCam RSSI，以及服務收到的 CC1101 RSSI。移除 Wi-Fi 與 CC1101 藍牙等額外連線入口，避免將同一裝置的整合頁做成多個彼此獨立的連線控制區。
+
+連線按鈕最終呼叫共用服務，而不是在 Widget 內直接建立 BLE client：
+
+```dart
+Future<void> _connect(HardwareConnectionType type) async {
+  try {
+    await _service!.connect(
+      type,
+      fallbackToSimulator: true,
+    );
+  } catch (error) {
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('連線失敗：$error')),
+      );
+    }
+  }
+}
+```
+
+UI 將錯誤明確呈現給使用者；模擬 fallback 的選擇也明確傳給服務。斷線操作同樣呼叫 `_service!.disconnect()`，不在頁面自行操作 BLE 特徵值或訂閱生命週期。
+
+### 3.2 熱成像頁：共用資料檢視
+
+`ThermalScanView` 改為 Stateless 檢視頁，從 `HardwareConnectionScope` 取得服務的最新掃描資料及連線狀態，顯示連線摘要、風險狀態、熱圖、ΔT 與 RSSI。頁面不再自行連線或維護掃描 Timer，並明確提示使用者回到硬體監控頁執行 BLE 連線與掃描操作。
+
+```dart
+final service = HardwareConnectionScope.of(context);
+final scan = service.latestScan;
+final result = scan?.analyze();
+final activeConnection = service.activeConnection;
+```
+
+這段程式直接取用共用服務的快照與連線狀態；實際 Widget 依 `result` 是否為空顯示等待狀態或熱圖與量測指標。因 scope 監聽同一個服務，資料更新後頁面會重新 build，並讀取最新快照。
+
+### 3.3 CC1101 診斷頁：保留檢視，不另建連線
+
+`Cc1101DiagnosticView` 改為訂閱共用服務發布的 CC1101 樣本；本頁不再另行建立 CC1101 連線，而是顯示共用服務收到的資料與共用連線狀態。既有樣本保存、複製及清除等檢視功能維持原有用途。沒有實際樣本時，頁面只能顯示服務或模擬流程實際提供的資料。
+
+## 四、SOP 高風險事件流程
+
+### 4.1 判定條件與事件出口
+
+高風險門檻集中在 `HardwareConnectionService` 的掃描資料處理流程：每筆掃描資料使用 `ScanData.analyze()` 取得 ΔT 與 RSSI，只有同時符合 **ΔT ≥ 6.0 °C**、**RSSI ≥ -50 dBm** 才符合 SOP 觸發條件。符合條件時服務發布風險事件；各頁不重複實作風險判定。
+
+```dart
+void _checkRisk(ScanData scan) {
+  final result = scan.analyze();
+  final highRisk = result.deltaT >= 6.0 && result.rssi >= -50.0;
+  if (!highRisk) return;
+
+  final lastRiskAt = _lastRiskAt;
+  if (lastRiskAt != null &&
+      DateTime.now().difference(lastRiskAt) < sopCooldown) {
+    return;
+  }
+  _lastRiskAt = DateTime.now();
+  _riskController.add(scan);
+}
+```
+
+風險事件只從服務的 Stream 發出；冷卻時間預設 20 秒。冷卻期間的高風險樣本不會重複通知 UI，但每筆樣本仍會更新最新掃描快照並正常送到資料事件流。
+
+### 4.2 防重入與冷卻
+
+1. 共用服務預設設定 20 秒 SOP 冷卻時間，以最近一次已發布的風險時間判斷是否允許再次發布。
+2. 冷卻期間到達的高風險資料不會立即再發出風險事件，避免資料頻率高時連續開啟 Dialog。
+3. 若高風險持續，冷卻時間結束後再收到符合門檻的新掃描資料，即可重新發布事件；不需要頁面自行重置風險旗標。
+4. 硬體監控頁訂閱風險事件，使用 `_isSopOpen` 防止同一時間重入；以 post-frame callback 開啟 `SopDialog.show(context)`，並檢查 Widget 是否仍 mounted。Dialog 完成或發生例外時會重置旗標。
+
+對應 UI 端的防重入入口如下：
+
+```dart
+void _showSopForScan(ScanData scan) {
+  if (_isSopOpen) return;
+  _isSopOpen = true;
+  WidgetsBinding.instance.addPostFrameCallback((_) async {
+    if (!mounted) {
+      _isSopOpen = false;
+      return;
+    }
+    try {
+      final decision = await SopDialog.show(context);
+      if (decision != null) await _persistSopDecision(scan, decision);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('處理 SOP 結果失敗：$error')),
+        );
+      }
+    } finally {
+      _isSopOpen = false;
+    }
+  });
+}
+```
+
+`_isSopOpen` 與服務層冷卻用途不同：服務層限制風險事件發布頻率；Widget 旗標則防止同一個畫面同時開多個 Dialog。`addPostFrameCallback` 避免在資料通知／build 尚未完成時直接操作 Navigator，`mounted` 檢查則避免頁面已離開仍使用失效的 `context`。
+
+### 4.3 使用者決策與紀錄
+
+SOP Dialog 提供「複檢異常」及「複檢正常（疑似誤判）」兩種人工決策。使用者完成選擇後，硬體監控頁取得定位並將掃描 ΔT、RSSI、時間、座標、風險顏色、決策結果與處置建議寫入資料庫。定位服務不可用或保存流程發生問題時，頁面會透過提示訊息回報，不將失敗當作成功處理。
+
+## 五、修改檔案與責任
+
+- `lib/services/hardware_connection_service.dart`：新增共用硬體服務；管理 ThermoCam BLE 連線狀態、資料快照、事件串流、模擬資料與 SOP 門檻／冷卻。
+- `lib/main.dart`：在應用程式根層建立服務、透過 scope 提供服務，並在根 Widget 生命週期結束時釋放。
+- `lib/services/thermocam_ble_service.dart`：補上可重複使用的斷線與資源釋放流程，支援由共用服務集中連線管理。
+- `lib/views/hardware/hardware_monitor_view.dart`：提供單一 BLE 連線控制、共享資料呈現、風險事件訂閱、SOP 防重入及決策紀錄流程。
+- `lib/views/thermal/thermal_scan_view.dart`：改為共用服務的唯讀熱成像檢視頁。
+- `lib/views/hardware/cc1101_diagnostic_view.dart`：改為訂閱共用資料的 CC1101 檢視頁，不再持有獨立連線。
+- `lib/views/thermal/sop_dialog.dart`：保留 SOP Dialog 呈現與決策介面；冷卻責任集中於共用服務，避免 Dialog 與服務各自維護冷卻鎖。
+- `test/hardware_connection_service_test.dart`：新增服務層連線狀態、連線錯誤與 SOP 冷卻測試。
+- `test/hardware_monitor_view_test.dart`：更新硬體監控測試，涵蓋單一 BLE 入口、SOP、無 BLE 時模擬 fallback，以及跨頁狀態與資料同步。
+- `test/widget_test.dart`：更新應用程式根頁測試，確認啟動後呈現整合監控頁及單一 BLE 入口。
+
+## 六、測試與驗證結果
+
+- 執行完整 `flutter test`：**19 項測試全部通過**。
+- 服務層測試確認連線狀態會依序轉換、斷線後回到 disconnected、連線失敗保留錯誤，以及高風險事件在冷卻期間被抑制、冷卻後可再次觸發。
+- Widget 測試確認硬體監控頁只呈現 ThermoCam_BLE 連線控制，接收符合條件的掃描資料會顯示 SOP；BLE 不可用時會進入模擬掃描。
+- 跨頁測試由硬體監控頁建立 BLE 連線，再檢查熱成像頁可看到相同掃描資料與 Connected 狀態、CC1101 頁可看到共用樣本與相同連線狀態，並確認回到主頁斷線後服務狀態同步更新。
+- 對本次修改相關 Dart 檔案執行 `flutter analyze`：無問題。
+- 執行 `git diff --check`：通過，沒有差異格式或空白錯誤。
+
+## 七、已知範圍與後續事項
+
+1. 本次只移除 Wi-Fi 的操作入口與共用連線架構依賴，沒有刪除 `Esp32HttpService` 等舊服務檔；若要清理，需先確認其他頁面、測試或平台程式碼沒有引用。
+2. CC1101 頁目前定位為共享樣本檢視，不代表本次已建立 CC1101 硬體連線服務；實際顯示內容取決於共用事件流是否收到樣本。
+3. 連線失敗後的模擬資料會讓 UI 保持可操作，但畫面需清楚區分模擬資料與真實硬體資料，避免誤認為實測結果。
+4. SOP 冷卻以收到的後續資料作為重試時機；若冷卻結束後沒有新掃描資料，不會僅靠計時器自動彈出 Dialog。
+
+## 八、今日結論
+
+完成由硬體監控頁統一操作 ThermoCam_BLE 的架構調整，並將服務生命週期放到應用程式根層。熱成像與 CC1101 頁透過同一服務讀取連線狀態及共享資料，降低各頁狀態分歧。高風險判定、事件冷卻與 Dialog 防重入各由明確層級負責，並以完整測試驗證單頁操作、跨頁同步、連線錯誤與 SOP 觸發流程。
+
+---
+
+# 2026-11-11 工作日誌｜配合 ESP32-C5 CC1101_BLE 韌體修正 App 連線
+
+## 一、問題與根因
+
+依照提供的 ESP32-C5 Arduino 韌體比對 App BLE 設定，確認 App 先前仍搜尋 `ThermoCam_BLE`，並使用另一組 ThermoCam 服務／特徵 UUID；韌體實際廣播名稱為 `CC1101_BLE`，使用 Nordic UART 風格 UUID。名稱與 GATT UUID 不一致時，App 無法找到目標裝置或無法取得通知特徵值，因此連線流程會失敗。
+
+連線後的資料格式也不同：韌體每秒傳送 CC1101 診斷 JSON，並在收到 RF 封包時更新通知；JSON 欄位包含 `captured_at`、`rssi`、`lqi`、`crc_ok`、`received_packets`、`lost_packets` 和 `per`，不是 App 原本期待的熱像陣列格式。
+
+## 二、App 端修改
+
+1. 將 BLE 用戶端服務調整為 `Esp32BleService`，並把裝置名稱及 Service／Characteristic UUID 對齊韌體設定。
+2. Android／原生掃描改為比對裝置平台名稱及廣播名稱，避免平台裝置名稱欄位未提供時漏掉廣播名稱；啟動掃描前檢查 BLE 支援與藍牙介面狀態。
+3. 連線後探索韌體宣告的 GATT Service 與 notify Characteristic，啟用通知，並保留 MTU 協商，以配合 JSON 通知封包大小。
+4. 新增 BLE JSON 通知緩衝／組裝，支援一筆 JSON 分散在多個通知片段的情況；成功解析後轉為 `Cc1101DiagnosticSample`，發布到共用 `HardwareDataMonitor`，供硬體監控與 CC1101 診斷頁使用。
+5. 硬體監控的連線名稱與共用連線類型同步改為 ESP32 BLE；連線成功但尚未收到熱像資料時，頁面會說明目前韌體只傳送 CC1101 診斷資料。
+
+## 三、韌體資料範圍
+
+目前韌體雖然以 `amg.readPixels(thermalPixels)` 讀取 AMG8833，但 `notifyDiagnosticData()` 建立的 JSON 沒有包含 `thermalPixels`。因此 App 可以連線並顯示 CC1101 RSSI／LQI／CRC／封包統計，但這份韌體尚不能提供熱圖或 ΔT；硬體監控頁的熱圖與依熱像資料觸發的 SOP 仍需韌體另外傳送 64 格熱像資料後才能工作。
+
+## 四、驗證結果
+
+- 新增測試確認 App 使用的 BLE 名稱與 UUID 和韌體完全一致。
+- 新增測試以韌體格式 JSON 分段送入通知解析器，確認組裝後發布為 CC1101 診斷樣本，而非熱像掃描資料。
+- 完整 `flutter test`：21 項測試全部通過。
+- 修改範圍的 `flutter analyze`：無問題。
+- `git diff --check`：通過。
