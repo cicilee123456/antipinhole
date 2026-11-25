@@ -200,7 +200,7 @@ class Esp32BleService {
       try {
         _webWifiCharacteristic =
             await service.getCharacteristic(wifiListCharacteristicUuid);
-      } on Exception {
+      } on web_ble.NotFoundError {
         _webWifiCharacteristic = null;
       }
       if (_webWifiCharacteristic != null) {

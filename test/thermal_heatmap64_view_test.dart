@@ -42,6 +42,25 @@ void main() {
         throwsArgumentError,
       );
     });
+
+    test('auto-scales hardware temperatures with a narrow temperature range',
+        () {
+      final temperatures = List<List<double>>.generate(
+        64,
+        (row) => List<double>.filled(64, 24 + row / 16),
+        growable: false,
+      );
+
+      final fixedScale = ThermalHeatmap64View.encodePixels(temperatures);
+      final automaticScale =
+          ThermalHeatmap64View.encodePixels(temperatures, autoScale: true);
+
+      expect(automaticScale.sublist(0, 3), isNot(fixedScale.sublist(0, 3)));
+      expect(
+        automaticScale.sublist(63 * 64 * 4, 63 * 64 * 4 + 3),
+        isNot(fixedScale.sublist(63 * 64 * 4, 63 * 64 * 4 + 3)),
+      );
+    });
   });
 
   testWidgets('shows min, max, and average temperatures', (tester) async {

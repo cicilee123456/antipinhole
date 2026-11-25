@@ -38,6 +38,16 @@ void main() {
     expect(scan.thermalGrid, hasLength(64));
     expect(scan.rssi, -65);
   });
+
+  test('parses the firmware Wi-Fi AP count field', () {
+    final scan = ScanData.fromEsp32Json({
+      'pixels': List<double>.filled(64, 25),
+      'rf_rssi': -70,
+      'wifi_count': 7,
+    });
+
+    expect(scan.wifiDeviceCount, 7);
+  });
 }
 
 ScanData _scan({required double deltaT, required double rssi}) {

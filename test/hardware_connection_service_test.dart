@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:anti_pinhole/models/cc1101_diagnostic_sample.dart';
 import 'package:anti_pinhole/models/scan_data.dart';
 import 'package:anti_pinhole/services/hardware_connection_service.dart';
 import 'package:anti_pinhole/services/hardware_data_monitor.dart';
@@ -53,6 +54,59 @@ void main() {
     expect(state.status, HardwareConnectionStatus.error);
     expect(state.error, contains('BLE unavailable'));
     expect(service.activeConnection, isNull);
+    service.dispose();
+  });
+
+  test('turns BLE thermal telemetry into the shared scan and risk event',
+      () async {
+    final service = HardwareConnectionService();
+    final riskFuture = service.riskEvents.first;
+    final pixels = List<double>.filled(64, 24)..[0] = 32;
+
+    HardwareDataMonitor.instance.add(
+      source: 'CC1101 BLE',
+      rawText: '',
+      cc1101Sample: Cc1101DiagnosticSample(
+        capturedAt: DateTime.utc(2026, 11, 12),
+        rssi: -45,
+        lqi: 40,
+        crcOk: true,
+        receivedPackets: 10,
+        lostPackets: 0,
+        per: 0,
+        distanceMeters: null,
+        rawJson: const {},
+        thermalPixels: pixels,
+        irDetected: true,
+      ),
+    );
+
+    final riskScan = await riskFuture.timeout(const Duration(seconds: 1));
+    expect(service.latestScan?.thermalGrid, pixels);
+    expect(service.latestScan?.rssi, -45);
+    expect(service.latestScan?.irDetected, isTrue);
+    expect(riskScan.analyze().deltaT, 8);
+    service.dispose();
+  });
+
+  test('publishes Wi-Fi characteristic updates through shared state', () async {
+    final service = HardwareConnectionService();
+    const networks = [
+      WifiAccessPoint(
+        ssid: 'My,Home WiFi',
+        rssi: -62,
+        distanceMeters: 1.9,
+      ),
+    ];
+
+    HardwareDataMonitor.instance.add(
+      source: 'Wi-Fi BLE',
+      rawText: 'Wi-Fi AP 清單完成（1 筆）',
+      wifiNetworks: networks,
+    );
+    await Future<void>.delayed(Duration.zero);
+
+    expect(service.latestWifiNetworks, networks);
     service.dispose();
   });
 

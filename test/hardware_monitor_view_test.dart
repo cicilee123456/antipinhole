@@ -23,17 +23,19 @@ void main() {
     );
 
     expect(find.text('等待熱成像資料'), findsOneWidget);
-    expect(find.text('ESP32 BLE RSSI'), findsOneWidget);
-    expect(find.text('熱像 RSSI'), findsOneWidget);
+    expect(find.text('Wi-Fi 偵測'), findsOneWidget);
+    expect(find.text('點擊查看'), findsOneWidget);
+    expect(find.text('此平台不支援'), findsNothing);
+    expect(find.text('風險判定 RSSI'), findsOneWidget);
     expect(find.text('CC1101 RSSI'), findsOneWidget);
-    expect(find.text('-- dBm'), findsNWidgets(3));
+    expect(find.text('-- dBm'), findsNWidgets(2));
     expect(find.text('感測器資料'), findsOneWidget);
     expect(find.text('AMG8833 熱像'), findsOneWidget);
     expect(find.text('VS1838B 紅外線'), findsOneWidget);
     expect(find.text('韌體尚未透過 BLE 上報'), findsNWidgets(2));
     expect(find.text('目前判定'), findsOneWidget);
     expect(find.text('等待資料'), findsOneWidget);
-    expect(find.text('CC1101_BLE'), findsOneWidget);
+    expect(find.text('ESP32 ThermoCam'), findsOneWidget);
     expect(find.text('連線'), findsOneWidget);
     expect(find.text('Disconnected'), findsOneWidget);
     expect(find.text('ESP32 Wi-Fi'), findsNothing);
@@ -73,15 +75,15 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 20));
 
-    expect(find.text('熱像 RSSI'), findsOneWidget);
-    expect(find.text('ESP32 BLE RSSI'), findsOneWidget);
+    expect(find.text('風險判定 RSSI'), findsOneWidget);
+    expect(find.text('Wi-Fi 偵測'), findsOneWidget);
     expect(find.text('CC1101 RSSI'), findsOneWidget);
-    expect(find.text('-62.0 dBm'), findsOneWidget);
-    expect(find.text('-71.0 dBm'), findsOneWidget);
+    expect(find.text('-62.0 dBm'), findsNothing);
+    expect(find.text('-71.0 dBm'), findsNWidgets(2));
     expect(
         find.textContaining('64 格 · 29.0–29.0 °C · ΔT 0.0 °C'), findsOneWidget);
     expect(find.textContaining('偵測到紅外線'), findsOneWidget);
-    expect(find.text('警示'), findsOneWidget);
+    expect(find.text('安全'), findsOneWidget);
     expect(find.text('最低溫度'), findsOneWidget);
     expect(find.text('最高溫度'), findsOneWidget);
     expect(find.text('平均溫度'), findsOneWidget);
@@ -89,6 +91,102 @@ void main() {
     expect(find.text('停止掃描'), findsNothing);
     expect(find.text('訊號列表'), findsNothing);
     expect(find.text('原始資料與解析狀態'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+    service.dispose();
+  });
+
+  testWidgets('opens the Wi-Fi AP list with RSSI and distance', (tester) async {
+    final service = HardwareConnectionService();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HardwareConnectionScope(
+          service: service,
+          child: const Scaffold(body: HardwareMonitorView()),
+        ),
+      ),
+    );
+
+    HardwareDataMonitor.instance.add(
+      source: 'ThermoCam BLE',
+      rawText: '',
+      cc1101Sample: Cc1101DiagnosticSample(
+        capturedAt: DateTime.utc(2026, 11, 18),
+        rssi: -65,
+        lqi: null,
+        crcOk: null,
+        receivedPackets: null,
+        lostPackets: null,
+        per: null,
+        distanceMeters: null,
+        rawJson: const {},
+        wifiDeviceCount: 2,
+        wifiNetworks: const [
+          WifiAccessPoint(
+            ssid: 'Lab WiFi',
+            rssi: -48,
+            distanceMeters: 0.55,
+          ),
+          WifiAccessPoint(
+            ssid: 'Guest',
+            rssi: -72,
+            distanceMeters: 4.25,
+          ),
+        ],
+      ),
+    );
+    await tester.pump();
+    await tester.ensureVisible(find.text('點擊查看'));
+    await tester.tap(find.text('點擊查看'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Wi-Fi 偵測 (2)'), findsOneWidget);
+    expect(find.text('Lab WiFi'), findsOneWidget);
+    expect(find.text('RSSI -48.0 dBm'), findsOneWidget);
+    expect(find.text('0.55 m'), findsOneWidget);
+    expect(find.text('Guest'), findsOneWidget);
+    expect(find.text('RSSI -72.0 dBm'), findsOneWidget);
+    expect(find.text('4.25 m'), findsOneWidget);
+
+    await tester.tap(find.text('關閉'));
+    await tester.pumpAndSettle();
+    await tester.pumpWidget(const SizedBox.shrink());
+    service.dispose();
+  });
+
+  testWidgets('shows Wi-Fi details received on the second BLE characteristic',
+      (tester) async {
+    final service = HardwareConnectionService();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HardwareConnectionScope(
+          service: service,
+          child: const Scaffold(body: HardwareMonitorView()),
+        ),
+      ),
+    );
+
+    HardwareDataMonitor.instance.add(
+      source: 'Wi-Fi BLE',
+      rawText: 'Wi-Fi AP 清單完成（1 筆）',
+      wifiNetworks: const [
+        WifiAccessPoint(
+          ssid: 'My,Home WiFi',
+          rssi: -62,
+          distanceMeters: 1.9,
+        ),
+      ],
+    );
+    await tester.pump();
+    await tester.ensureVisible(find.text('點擊查看'));
+    await tester.tap(find.text('點擊查看'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('My,Home WiFi'), findsOneWidget);
+    expect(find.text('RSSI -62.0 dBm'), findsOneWidget);
+    expect(find.text('1.90 m'), findsOneWidget);
+
+    await tester.tap(find.text('關閉'));
+    await tester.pumpAndSettle();
     await tester.pumpWidget(const SizedBox.shrink());
     service.dispose();
   });
@@ -128,7 +226,7 @@ void main() {
     service.dispose();
   });
 
-  testWidgets('falls back to mock scans when ESP32 BLE is unavailable',
+  testWidgets('shows BLE connection errors without starting mock scans',
       (tester) async {
     final service = HardwareConnectionService(
       bleService: _FailingEsp32BleService(),
@@ -145,16 +243,12 @@ void main() {
     await tester.ensureVisible(find.text('連線'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('連線'));
-    await tester.pump();
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(seconds: 3)),
-    );
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 20));
+    await tester.pumpAndSettle();
 
-    expect(find.text('模擬模式 · 未連接硬體'), findsOneWidget);
-    expect(find.text('停止模擬'), findsOneWidget);
-    expect(find.text('等待熱成像資料'), findsNothing);
+    expect(find.textContaining('Bad state: BLE unavailable'), findsNWidgets(2));
+    expect(find.text('模擬模式 · 未連接硬體'), findsNothing);
+    expect(find.text('停止模擬'), findsNothing);
+    expect(find.text('等待熱成像資料'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
     service.dispose();
   });
@@ -176,7 +270,7 @@ void main() {
     );
 
     final bleCard = find.ancestor(
-      of: find.text('CC1101_BLE'),
+      of: find.text('ESP32 ThermoCam'),
       matching: find.byType(Card),
     );
     await tester.ensureVisible(bleCard.first);
@@ -189,10 +283,41 @@ void main() {
       HardwareConnectionStatus.connected,
     );
     await tester.pump();
-    expect(find.text('-52.0 dBm'), findsOneWidget);
+    expect(find.text('點擊查看'), findsOneWidget);
+    expect(find.text('ESP32 BLE RSSI'), findsNothing);
     expect(
-      find.textContaining('韌體只傳送 CC1101 診斷資料'),
+      find.textContaining('ESP32 未提供有效的 64 格熱像資料'),
       findsOneWidget,
+    );
+
+    final thermalPixels = List<double>.filled(64, 24)..[0] = 28;
+    HardwareDataMonitor.instance.add(
+      source: 'CC1101 BLE',
+      rawText: '',
+      cc1101Sample: Cc1101DiagnosticSample(
+        capturedAt: DateTime.utc(2026, 11, 12, 12),
+        rssi: -70,
+        lqi: 40,
+        crcOk: true,
+        receivedPackets: 10,
+        lostPackets: 0,
+        per: 0,
+        distanceMeters: null,
+        rawJson: const {},
+        thermalPixels: thermalPixels,
+        irDetected: false,
+        rfDetected: false,
+      ),
+    );
+    await tester.pump();
+    expect(service.latestScan?.thermalGrid, thermalPixels);
+    await tester.ensureVisible(find.text('AMG8833 熱像'));
+    await tester.pump();
+    expect(find.textContaining('ΔT 4.0 °C'), findsOneWidget);
+    expect(find.textContaining('目前無 RF 封包'), findsOneWidget);
+    expect(
+      find.textContaining('ESP32 未提供有效的 64 格熱像資料'),
+      findsNothing,
     );
 
     HardwareDataMonitor.instance.add(
@@ -233,14 +358,14 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('-62.0 dBm'), findsOneWidget);
     expect(find.text('Shared sensor'), findsOneWidget);
-    expect(find.text('CC1101_BLE · Connected'), findsOneWidget);
+    expect(find.text('ESP32 ThermoCam · Connected'), findsOneWidget);
 
     await tester.tap(find.byTooltip('Open navigation menu'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('CC1101 診斷'));
     await tester.pumpAndSettle();
     expect(find.text('-71.0 dBm'), findsOneWidget);
-    expect(find.text('CC1101_BLE · Connected'), findsOneWidget);
+    expect(find.text('ESP32 ThermoCam · Connected'), findsOneWidget);
 
     await tester.pageBack();
     await tester.pumpAndSettle();
@@ -255,6 +380,7 @@ void main() {
           .first,
     );
     await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('斷線'));
     await tester.tap(find.text('斷線'));
     await tester.pumpAndSettle();
     expect(

@@ -30,9 +30,25 @@ void main() {
       'CC1101RSSI': -73.5,
       'cc1101_lqi': 38,
     });
-
     expect(sample.rssi, -73.5);
     expect(sample.lqi, 38);
+  });
+
+  test('parses Wi-Fi AP names, RSSI and estimated distances', () {
+    final sample = Cc1101DiagnosticSample.fromJson({
+      'wifi_count': 2,
+      'wifi_networks': [
+        {'ssid': 'Office WiFi', 'rssi': -48, 'distance_m': 0.55},
+        {'ssid': '', 'rssi': -76, 'distance_m': 5.25},
+      ],
+    });
+
+    expect(sample.wifiDeviceCount, 2);
+    expect(sample.wifiNetworks, hasLength(2));
+    expect(sample.wifiNetworks.first.ssid, 'Office WiFi');
+    expect(sample.wifiNetworks.first.rssi, -48);
+    expect(sample.wifiNetworks.first.distanceMeters, 0.55);
+    expect(sample.wifiNetworks.last.ssid, '[Hidden SSID]');
   });
 
   test('keeps unsupported metrics unavailable instead of inventing values', () {
